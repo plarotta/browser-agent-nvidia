@@ -1,6 +1,6 @@
 # System Architecture
 
-High-level architecture of the Self-Learning Browser Agent and its pending work. For full design rationale, see the repo root: `description.txt` and `implementation_plan.txt`.
+High-level architecture of the Self-Learning Browser Agent.
 
 ---
 
@@ -8,10 +8,12 @@ High-level architecture of the Self-Learning Browser Agent and its pending work.
 
 The system is a **browser automation agent** that:
 
-1. **Observes** the page (DOM + screenshot) and a natural-language goal.
-2. **Predicts** the next browser action via a multimodal policy (vision + language).
-3. **Executes** the action via Playwright.
-4. **Optionally learns** at deployment time using Self-Distillation Fine-Tuning (SDFT) from successful steps.
+1. **Observes** the page (DOM elements + visible page text + screenshot) and a natural-language goal.
+2. **Predicts** the next browser action via a multimodal VLM policy.
+3. **Applies guards** to prevent common small-model errors (e.g. premature FINISH).
+4. **Executes** the action via Playwright.
+5. **Terminates** when the model outputs FINISH (with an answer) or `max_steps` is reached.
+6. **Optionally learns** at deployment time using Self-Distillation Fine-Tuning (SDFT).
 
 **Design principle:** *Frozen general intelligence + bounded personalization at the edges.*
 
@@ -25,12 +27,11 @@ The system is a **browser automation agent** that:
 │  record | run --task --goal [--backend] [--train] [--url] [--max-steps]  │
 └─────────────────────────────────────────────────────────────────────────┘
                                         │
-          User goal → GoalInterpreter → GoalSpec (success_signals, required_outputs, expected_artifact)
-                                        │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     Agent Runtime (agent_runtime.py)                     │
-│  Observe → Policy → Action → Log → SuccessChecker (done?) → SDFT (opt.)   │
+│  Observe → Build Prompt → Policy → Parse → Guard → Execute → Log        │
+│  Done when action.type == FINISH                                         │
 └─────────────────────────────────────────────────────────────────────────┘
      │                │                │                │
      ▼                ▼                ▼                ▼
@@ -39,8 +40,10 @@ The system is a **browser automation agent** that:
 │           │   │              │   │ Execution   │   │                  │
 │ DOM       │   │ Multimodal   │   │ Playwright  │   │ SDFT (EMA teacher│
 │ Snapshot  │   │ (Transformers│   │ ActionExec  │   │ + gating)        │
-│ + Visual  │   │ TensorRT    │   │             │   │ CheckpointManager│
-│ Capture   │   │ MLX)         │   │             │   │ (rollback)       │
+│ + Page    │   │ TensorRT    │   │             │   │ CheckpointManager│
+│ Text      │   │ MLX)         │   │             │   │ (rollback)       │
+│ + Visual  │   │              │   │             │   │                  │
+│ Capture   │   │              │   │             │   │                  │
 └──────────┘   └──────────────┘   └─────────────┘   └──────────────────┘
      │                │                   │
      └────────────────┴───────────────────┘
@@ -57,12 +60,35 @@ The system is a **browser automation agent** that:
 
 ## 3. Data Flow (Single Step)
 
-1. **Observe:** `DOMSnapshotter` captures interactive elements with stable `data-agent-id`s; `VisualCapture` captures a screenshot. Both are used to build a text prompt (DOM summary + “screenshot as image”).
-2. **Prompt:** `AgentRuntime._build_prompt()` fills a system template with goal, step number, action history, DOM summary, and optional last-error section.
-3. **Predict:** `MultimodalPolicy.forward(screenshot, prompt)` returns raw model text. `ActionParser` extracts a single JSON action (type, target_element_id, value, confidence).
-4. **Execute:** `ActionExecutor.execute(type, params)` resolves element by `element_id` (or selector), then runs click/type/scroll/wait/navigate/etc. Returns success/failure and error reason.
-5. **Log:** `TrajectoryLogger.log_step()` writes DOM, screenshot, action, reward, done to the current trajectory; `save_trajectory()` persists to `log_dir`.
-6. **Learn (if `--train`):** `SDFTModule.should_update(entropy, success)` gates updates; when allowed, `update_teacher()` runs EMA from student to teacher. CheckpointManager is available for save/rollback but not yet wired into the main loop.
+1. **Observe:** `DOMSnapshotter.capture()` extracts interactive elements with stable `data-agent-id`s and visible page text (via `document.body.innerText`). `VisualCapture` takes a screenshot. Both feed into the prompt.
+
+2. **Build Prompt:** `AgentRuntime._build_prompt()` fills the system template. The prompt is structured for truncation safety:
+   - **Top:** Goal + JSON output format + action descriptions + rules (always visible)
+   - **Middle:** Error feedback (if last action failed) + action history
+   - **Bottom:** DOM summary with interactive elements + page text (may be truncated)
+
+   For MLX backend, DOM is capped at 2000 chars; total prompt at 3000 chars.
+
+3. **Predict:** `MultimodalPolicy.forward(screenshot, prompt)` dispatches to the active backend (Transformers/TensorRT/MLX) and returns raw model text.
+
+4. **Parse:** `ActionParser.parse()` extracts the action in priority order:
+   - **JSON extraction:** Brace-balanced parser finds JSON objects with an `action` key.
+   - **Fallback regex:** Line-start-anchored regex (`^ACTION_TYPE`) matches non-JSON output without false-matching action words in echoed prompts or DOM hints.
+   - **Done-language detection:** If the model says "goal is achieved/complete" without a formal action, it's parsed as FINISH.
+
+5. **Guard:** Programmatic safety checks override the model when needed:
+   - If FINISH is requested but no PRESS_ENTER has occurred since the last TYPE, the runtime overrides to PRESS_ENTER (prevents skipping search submission).
+
+6. **Execute:** `ActionExecutor.execute(type, params)` runs the action via Playwright:
+   - TYPE rejects empty values to prevent phantom actions.
+   - PRESS_ENTER waits for `domcontentloaded` + 1.5s settle time so the next step sees loaded results.
+   - FINISH is a no-op (termination is handled by the runtime).
+
+7. **Terminate:** `done = (action_type == "finish")`. The FINISH action's `value` field contains the final answer.
+
+8. **Log:** `TrajectoryLogger.log_step()` writes DOM, screenshot, action, reward, done per step.
+
+9. **Learn (optional):** If `--train`, `SDFTModule.should_update()` gates EMA teacher updates based on success.
 
 ---
 
@@ -70,61 +96,56 @@ The system is a **browser automation agent** that:
 
 | Component | Location | Status | Notes |
 |-----------|----------|--------|--------|
-| **CLI** | `src/main.py` | ✅ Implemented | `record`, `run`, `status`; backends: transformers, tensorrt, mlx |
-| **Agent runtime** | `src/agent/agent_runtime.py` | ✅ Implemented | Step loop, prompt build, policy call, execute, log, SDFT gating |
-| **Action parser** | `src/agent/action_parser.py` | ✅ Implemented | JSON extraction, normalizes to executor format (element_id, value) |
-| **Session manager** | `src/browser_interaction/session_manager.py` | ✅ Implemented | Playwright launch, navigate, close |
-| **Action executor** | `src/browser_interaction/action_executor.py` | ✅ Implemented | click, type, press_enter, select, scroll, wait, navigate |
-| **DOM snapshotter** | `src/observation/dom_snapshotter.py` | ✅ Implemented | Interactive elements, stable IDs, formatted summary |
-| **Visual capture** | `src/observation/visual_capture.py` | ✅ Implemented | Screenshot for policy |
-| **Multimodal policy** | `src/policy/multimodal_policy.py` | ✅ Implemented | Dispatches to Transformers / TensorRT / MLX |
-| **Transformers policy** | `src/policy/transformers_policy.py` | ✅ Implemented | Hugging Face VLM inference |
-| **TensorRT policy** | `src/policy/tensorrt_policy.py` | ✅ Implemented | TRT engine inference |
-| **MLX policy** | `src/policy/mlx_policy.py` | ✅ Implemented | Apple Silicon VLM |
-| **Adapter layer** | `src/policy/adapter_layer.py` | ⚠️ Present | Not yet wired as learnable head in run path |
-| **SDFT module** | `src/sdft/sdft_module.py` | ✅ Implemented | EMA teacher, KL loss, confidence/success gating; no actual gradient step on student yet |
-| **Checkpoint manager** | `src/safety/checkpoint_manager.py` | ✅ Implemented | Save/load/rollback; not yet invoked from runtime on metrics |
-| **Goal spec** | `src/evaluation/goal_spec.py` | ✅ Implemented | Structured success criteria (goal_type, success_signals, required_outputs, expected_artifact) |
-| **Goal interpreter** | `src/evaluation/goal_interpreter.py` | ✅ Implemented | Rule-based: user goal → GoalSpec (no LLM) |
-| **Success checker** | `src/evaluation/success_checker.py` | ✅ Implemented | check_output_present, check_page_signal, check_agent_finish; done = any two of three |
-| **Config** | `src/utils/config.py` | ✅ Implemented | Model, backend, device, browser, learning, paths, goal_spec |
-| **Trajectory logger** | `src/utils/trajectory_logger.py` | ✅ Implemented | Per-step log, save trajectory to disk |
-| **Visualization** | `src/visualization/` | ❌ Placeholder | No dashboard or overlay yet |
+| **CLI** | `src/main.py` | Done | `record`, `run`, `status`; backends: transformers, tensorrt, mlx; `--model-id` override |
+| **Agent runtime** | `src/agent/agent_runtime.py` | Done | Step loop, truncation-safe prompt, guards, FINISH-based termination |
+| **Action parser** | `src/agent/action_parser.py` | Done | JSON extraction, line-anchored fallback regex, done-language detection |
+| **Session manager** | `src/browser_interaction/session_manager.py` | Done | Playwright launch with stealth settings, navigate, close |
+| **Action executor** | `src/browser_interaction/action_executor.py` | Done | click, type (rejects empty), press_enter (waits for load), scroll, wait, navigate, finish |
+| **DOM snapshotter** | `src/observation/dom_snapshotter.py` | Done | Interactive elements with stable IDs + visible page text via `innerText` |
+| **Visual capture** | `src/observation/visual_capture.py` | Done | Screenshot for policy |
+| **Multimodal policy** | `src/policy/multimodal_policy.py` | Done | Dispatches to Transformers / TensorRT / MLX |
+| **Transformers policy** | `src/policy/transformers_policy.py` | Done | Hugging Face VLM inference |
+| **TensorRT policy** | `src/policy/tensorrt_policy.py` | Done | TRT engine inference |
+| **MLX policy** | `src/policy/mlx_policy.py` | Done | Apple Silicon VLM; 3000-char prompt limit; BOS-strip fix for mllama |
+| **Adapter layer** | `src/policy/adapter_layer.py` | Present | Not yet wired as learnable head in run path |
+| **SDFT module** | `src/sdft/sdft_module.py` | Done | EMA teacher, KL loss, confidence/success gating; no actual gradient step yet |
+| **Checkpoint manager** | `src/safety/checkpoint_manager.py` | Done | Save/load/rollback; not yet invoked from runtime |
+| **Evaluation** | `src/evaluation/` | Unused | GoalSpec, GoalInterpreter, SuccessChecker exist but are not used in runtime; available for offline eval |
+| **Config** | `src/utils/config.py` | Done | Model, backend, device, browser, learning, paths |
+| **Trajectory logger** | `src/utils/trajectory_logger.py` | Done | Per-step log, save trajectory to disk |
 
 ---
 
-## 5. Pending Todos (High Level)
+## 5. Key Design Decisions
 
-- **Policy adaptation in the loop:** The policy backbone is used as-is; there is no LoRA/adapter training step. SDFT updates the EMA teacher from the student, but the “student” is not actually updated by gradient steps. *Todo: Wire a small learnable adapter (e.g. LoRA) and perform bounded online updates using SDFT loss when gating allows.*
+### Truncation-safe prompt
+Small VLMs (12B quantized) fail when the output format instructions are at the end of a long prompt and get truncated. The prompt puts format instructions at the top (GOAL + JSON format + rules) and variable-length content at the bottom (history + DOM). Even if DOM is truncated, the model always sees how to respond.
 
-- **Checkpoint integration:** `CheckpointManager` exists but is not used in the main run loop. There is no “save on success / rollback on degradation” logic. *Todo: Integrate checkpoint save when metrics are good and rollback when success rate or a chosen metric degrades.*
+### Programmatic guards over prompt rules
+12B models can't reliably follow multi-step sequencing rules in text (e.g. "you must PRESS_ENTER before FINISH"). The runtime enforces these constraints programmatically, which is 100% reliable regardless of model size.
 
-- **Entropy/confidence from model:** SDFT gating uses a placeholder entropy (e.g. 0.0). The model outputs a `confidence` field in JSON; it is not yet passed into `sdft.should_update()`. *Todo: Pass parsed confidence (or derived entropy) from the policy output into SDFT gating.*
+### FINISH-based termination
+Previously used GoalSpec + SuccessChecker (agent defines success criteria in step 0, runtime checks DOM for required outputs). This was too complex for 12B models — they couldn't reliably produce GOAL_SPEC JSON. Replaced with simple FINISH action detection: `done = (action_type == "finish")`.
 
-- **Task completion / stopping:** The run loop stops only on `max_steps` or failure; there is no “task done” signal (e.g. success page or user-defined criterion). Done: GoalInterpreter + SuccessChecker; stop when any two of (output present, page signal, validated finish).
+### Page text extraction
+DOM snapshots only capture interactive elements (buttons, links, textboxes). Static content (search results, weather data, prices) is invisible to the model. Added `document.body.innerText` extraction so the model can read and report actual page content in FINISH value.
 
-- **Replay / one-shot demo usage:** Recorded trajectories are logged but not used as few-shot examples or for direct replay in the current run path. *Todo: Use recorded demos (e.g. as in-context examples or for behavioral cloning) as per the original one-shot learning vision.*
-
-- **Update budget:** Config has `update_budget`; SDFT does not enforce a cap on the number of updates. *Todo: Enforce update budget in SDFT and optionally in checkpoint/rollback policy.*
-
-- **Visualization / demo UX:** No live dashboard, overlay, or simple graphs for “current action”, “confidence”, “learning on/off”, “rollback”. *Todo: Add a minimal live view or console overlay for demos.*
-
-- **Config from file:** `AgentConfig.load(path)` exists but the CLI does not support loading config from a YAML/JSON file. *Todo: Add a `--config` option to the CLI.*
+### Line-anchored fallback parser
+The previous fallback regex matched action keywords (TYPE, CLICK) anywhere in text, causing phantom action matches when the model echoed the prompt. The new regex requires keywords at the start of a line (`^` with `re.MULTILINE`), eliminating false matches from DOM hints and echoed prompt text.
 
 ---
 
 ## 6. Technology Choices
 
-- **Playwright:** Reliable automation, clear actions, good for logging and replay.
-- **Multimodal (DOM + screenshot):** DOM gives semantics and element IDs; screenshot gives layout and visual affordances; together they improve robustness to UI drift.
+- **Playwright:** Reliable automation, clear actions, good for logging and replay. Stealth settings prevent CAPTCHA triggers.
+- **Multimodal (DOM + page text + screenshot):** DOM gives element IDs; page text gives readable content; screenshot gives layout and visual affordances.
 - **Backends:** Transformers for flexibility; TensorRT for throughput on NVIDIA; MLX for Apple Silicon.
-- **Frozen backbone + adapter:** Keeps behavior stable and limits GPU memory; only a small surface (future LoRA/head) should adapt.
-- **EMA teacher + gating:** Enables deployment-time self-distillation with a safety story (confidence + success gating, and future rollback).
+- **Frozen backbone + adapter:** Keeps behavior stable and limits memory; only a small surface (future LoRA/head) should adapt.
+- **EMA teacher + gating:** Enables deployment-time self-distillation with a safety story (success gating, and future rollback).
 
 ---
 
 ## 7. References
 
-- **Design & lifecycle:** `description.txt` (high-level design, learning phases, safety).
-- **Module breakdown & build order:** `implementation_plan.txt` (per-module responsibilities and MVP notes).
-- **Run instructions & options:** `README.md` and `docs/NEXT_STEPS.md`.
+- **Run instructions & options:** `README.md`
+- **Roadmap:** `docs/NEXT_STEPS.md`
