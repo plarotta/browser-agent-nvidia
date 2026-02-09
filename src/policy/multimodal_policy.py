@@ -3,6 +3,12 @@ from PIL import Image
 from typing import Optional
 from src.policy.transformers_policy import TransformersPolicy
 from src.policy.tensorrt_policy import TensorRTPolicy
+# Deferred import for MLXPolicy to avoid hard dependency on non-mac systems, 
+# but for now we can import it inside __init__ or just try/except
+try:
+    from src.policy.mlx_policy import MLXPolicy
+except ImportError:
+    MLXPolicy = None
 
 class MultimodalPolicy(nn.Module):
     def __init__(self, 
@@ -22,6 +28,13 @@ class MultimodalPolicy(nn.Module):
                 self.engine_dir = "trt_engine_output"
             print(f"Initializing TensorRTPolicy with engine at {self.engine_dir}")
             self.impl = TensorRTPolicy(model_id, self.engine_dir, device)
+        elif backend == "mlx":
+            print("Initializing MLXPolicy")
+            if MLXPolicy is None:
+                raise ImportError("MLXPolicy could not be imported. Ensure mlx and mlx-vlm are installed.")
+            # Default to Qwen2-VL-2B-4bit if using default Nemotron (which MLX might not support well yet or we prefer Qwen)
+            # or just let the user specify. Ideally we swap the default for them in main.py.
+            self.impl = MLXPolicy(model_id)
         else:
             print("Initializing TransformersPolicy")
             self.impl = TransformersPolicy(model_id, device)
@@ -32,6 +45,8 @@ class MultimodalPolicy(nn.Module):
 
     @property
     def processor(self):
+        if self.backend == "mlx":
+             return self.impl.processor
         return self.impl.processor
 
     def load_model(self):

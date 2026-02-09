@@ -106,7 +106,7 @@ class TransformersPolicy(nn.Module):
             input_ids=input_ids,
             pixel_values=pixel_values,
             attention_mask=attention_mask,
-            max_new_tokens=128
+            max_new_tokens=256
         )
         decoded = self.processor.decode(output[0], skip_special_tokens=True)
         return decoded

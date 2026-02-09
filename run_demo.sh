@@ -7,6 +7,6 @@ echo "2. Running Agent Status Check..."
 uv run python -m src.main status
 
 echo "3. Launching Agent in Inference Mode (Dummy Task)..."
-uv run python -m src.main run --task "demo_task" --no-headless
+uv run python -m src.main run --task "demo_task" --goal "Complete the task on the current web page." --no-headless
 
 echo "Done!"

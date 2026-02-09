@@ -13,11 +13,26 @@ class SessionManager:
         """Starts a new browser session and returns a page."""
         if self.page:
             return self.page
-            
+
         self.playwright = sync_playwright().start()
-        # Launch Chromium by default, extendable later
-        self.browser = self.playwright.chromium.launch(headless=self.headless)
-        self.context = self.browser.new_context()
+        self.browser = self.playwright.chromium.launch(
+            headless=self.headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        self.context = self.browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+        )
+        # Remove the webdriver flag that sites use to detect automation
+        self.context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        """)
         self.page = self.context.new_page()
         return self.page
 
