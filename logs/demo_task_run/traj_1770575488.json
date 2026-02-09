@@ -1,0 +1,72 @@
+[
+  {
+    "step_id": 0,
+    "timestamp": 1770575492.108452,
+    "observation_dom": "<body><div><h1>Example Domain</h1><p>This domain is for use in documentation examples without needing permission. Avoid use in operations.</p><p><a href=\"https://iana.org/domains/example\">Learn more</a></p></div>\n</body>",
+    "action": {
+      "type": "wait",
+      "params": {
+        "duration": 1000
+      }
+    },
+    "reward": 1.0,
+    "done": false,
+    "screenshot_path": "logs/demo_task_run/traj_1770575488_step_0.png"
+  },
+  {
+    "step_id": 1,
+    "timestamp": 1770575493.205311,
+    "observation_dom": "<body><div><h1>Example Domain</h1><p>This domain is for use in documentation examples without needing permission. Avoid use in operations.</p><p><a href=\"https://iana.org/domains/example\">Learn more</a></p></div>\n</body>",
+    "action": {
+      "type": "wait",
+      "params": {
+        "duration": 1000
+      }
+    },
+    "reward": 1.0,
+    "done": false,
+    "screenshot_path": "logs/demo_task_run/traj_1770575488_step_1.png"
+  },
+  {
+    "step_id": 2,
+    "timestamp": 1770575494.293273,
+    "observation_dom": "<body><div><h1>Example Domain</h1><p>This domain is for use in documentation examples without needing permission. Avoid use in operations.</p><p><a href=\"https://iana.org/domains/example\">Learn more</a></p></div>\n</body>",
+    "action": {
+      "type": "wait",
+      "params": {
+        "duration": 1000
+      }
+    },
+    "reward": 1.0,
+    "done": false,
+    "screenshot_path": "logs/demo_task_run/traj_1770575488_step_2.png"
+  },
+  {
+    "step_id": 3,
+    "timestamp": 1770575495.386128,
+    "observation_dom": "<body><div><h1>Example Domain</h1><p>This domain is for use in documentation examples without needing permission. Avoid use in operations.</p><p><a href=\"https://iana.org/domains/example\">Learn more</a></p></div>\n</body>",
+    "action": {
+      "type": "wait",
+      "params": {
+        "duration": 1000
+      }
+    },
+    "reward": 1.0,
+    "done": false,
+    "screenshot_path": "logs/demo_task_run/traj_1770575488_step_3.png"
+  },
+  {
+    "step_id": 4,
+    "timestamp": 1770575496.4658759,
+    "observation_dom": "<body><div><h1>Example Domain</h1><p>This domain is for use in documentation examples without needing permission. Avoid use in operations.</p><p><a href=\"https://iana.org/domains/example\">Learn more</a></p></div>\n</body>",
+    "action": {
+      "type": "wait",
+      "params": {
+        "duration": 1000
+      }
+    },
+    "reward": 1.0,
+    "done": false,
+    "screenshot_path": "logs/demo_task_run/traj_1770575488_step_4.png"
+  }
+]
