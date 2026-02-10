@@ -21,7 +21,7 @@ mkdir -p "$ADAPTERS_DIR" "$TRAJECTORIES_DIR"
 
 # Start vLLM in background
 echo "Starting vLLM..."
-vllm serve "$MODEL_ID" \
+uv run vllm serve "$MODEL_ID" \
     --host 0.0.0.0 \
     --port "$VLLM_PORT" \
     --enable-lora \
@@ -53,7 +53,7 @@ fi
 
 # Start FastAPI control plane
 echo "Starting FastAPI control plane on port $API_PORT..."
-python -m src.main serve \
+uv run python -m src.main serve \
     --model-id "$MODEL_ID" \
     --host 0.0.0.0 \
     --port "$API_PORT" \
