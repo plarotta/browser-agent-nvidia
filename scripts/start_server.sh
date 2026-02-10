@@ -26,7 +26,9 @@ uv run vllm serve "$MODEL_ID" \
     --port "$VLLM_PORT" \
     --enable-lora \
     --max-lora-rank 64 \
-    --trust-remote-code &
+    --trust-remote-code & \
+    --load-in-4bit \
+    --dtype bf16
 
 VLLM_PID=$!
 
@@ -59,4 +61,4 @@ uv run python -m src.main serve \
     --port "$API_PORT" \
     --vllm-url "http://localhost:$VLLM_PORT" \
     --adapters-dir "$ADAPTERS_DIR" \
-    --trajectories-dir "$TRAJECTORIES_DIR"
+    --trajectories-dir "$TRAJECTORIES_DIR" 
