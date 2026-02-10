@@ -1,5 +1,6 @@
 #!/bin/bash
-# RunPod launch script: starts vLLM + FastAPI control plane
+# Browser Agent Server launch script for RunPod / vLLM 0.15+
+# Starts vLLM + FastAPI control plane
 # Usage: ./scripts/start_server.sh [MODEL_ID]
 
 set -e
@@ -10,13 +11,6 @@ API_PORT=8080
 ADAPTERS_DIR="./adapters"
 TRAJECTORIES_DIR="./trajectories"
 
-# Quantization / memory management
-export VLLM_QUANTIZATION="4bit"        # Tells vLLM to use 4-bit quantization
-export VLLM_OFFLOAD_DIR="/tmp"         # CPU offload location
-export VLLM_NUM_ENGINE_PROCS=1
-export PYTORCH_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:64,expandable_segments:True"
-
-
 echo "=== Browser Agent Server ==="
 echo "Model: $MODEL_ID"
 echo "vLLM port: $VLLM_PORT"
@@ -24,20 +18,34 @@ echo "API port: $API_PORT"
 
 mkdir -p "$ADAPTERS_DIR" "$TRAJECTORIES_DIR"
 
-# Detect GPU VRAM
-GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits)
-echo "Detected GPU memory: ${GPU_MEM} MiB"
+# Enable LoRA runtime updating
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=true
 
-# Decide whether to enforce 4-bit + offload
-VLLM_ARGS="--host 0.0.0.0 --port $VLLM_PORT --enable-lora --max-lora-rank 64 --trust-remote-code --dtype bfloat16"
-if [ "$GPU_MEM" -lt 32000 ]; then
+# Set vLLM engine memory settings
+export VLLM_NUM_ENGINE_PROCS=1
+export PYTORCH_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:64,expandable_segments:True"
+
+# Detect GPU memory
+GPU_MEM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1)
+echo "Detected GPU memory: ${GPU_MEM_MB} MiB"
+
+if [ "$GPU_MEM_MB" -lt 32000 ]; then
     echo "GPU < 32GB: enabling 4-bit quantization + CPU offload to avoid OOM"
-    VLLM_ARGS="$VLLM_ARGS
+    export VLLM_QUANTIZATION="4bit"
+    export VLLM_OFFLOAD_DIR="/tmp"
+else
+    echo "GPU >= 32GB: using full precision BF16"
+    export VLLM_QUANTIZATION="bf16"
 fi
 
 # Start vLLM in background
 echo "Starting vLLM..."
-uv run vllm serve "$MODEL_ID" $VLLM_ARGS &
+uv run vllm serve "$MODEL_ID" \
+    --host 0.0.0.0 \
+    --port "$VLLM_PORT" \
+    --enable-lora \
+    --max-lora-rank 64 \
+    --trust-remote-code &
 
 VLLM_PID=$!
 
