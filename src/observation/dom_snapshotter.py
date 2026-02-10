@@ -11,6 +11,10 @@ class DOMSnapshotter:
             elements = self._extract_elements()
             formatted = self._format_elements(elements)
             page_text = self._extract_page_text()
+            if not page_text:
+                # Page may be mid-navigation; brief wait and retry
+                self.page.wait_for_timeout(1500)
+                page_text = self._extract_page_text()
             if page_text:
                 formatted += f"\n\nPAGE TEXT (visible content):\n{page_text}"
             return formatted

@@ -14,6 +14,11 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 - **TYPE validation:** Action executor rejects TYPE with empty value to prevent phantom actions.
 - **PRESS_ENTER wait:** Added `wait_for_load_state` + 1.5s settle time after Enter so the next step sees loaded results.
 - **MLX prompt budget:** Raised from 1500 to 3000 chars; DOM budget from 700 to 2000 chars.
+- **Remote vLLM server:** Client/server split — Mac runs browser agent, GPU box runs vLLM (Nemotron) + FastAPI control plane. `RemoteVLLMPolicy` sends HTTP requests to `/act`.
+- **SDFT training server-side:** PEFT LoRA training on uploaded trajectories via `/train` endpoint. Pauses vLLM during training (single-GPU strategy), restarts with new adapter.
+- **LoRA adapter lifecycle:** Hot-load/unload adapters via vLLM's dynamic LoRA API. Adapter metadata tracked in `adapters_meta.json`.
+- **Trajectory upload:** Client packages log_dir as tar.gz, uploads to server. Server stores and uses for training.
+- **NIM backend:** NVIDIA cloud API inference via NIMPolicy.
 
 ---
 
@@ -62,13 +67,9 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 - Maintain a short history of success/failure. If success rate drops, call `checkpoint_manager.rollback(policy)`.
 **Effort:** Medium.
 
-### 2.2 Add a learnable adapter and real SDFT updates
-**Goal:** Actually update the policy with gradient steps so SDFT has an effect.
-**Action:**
-- Introduce a small adapter (e.g. LoRA on the language model head).
-- When `sdft.should_update()` is True: compute teacher vs student KL loss, backward, optimizer step with small LR.
-- Keep backbone frozen; only adapter parameters in the optimizer.
-**Effort:** Medium-large.
+### 2.2 ~~Add a learnable adapter and real SDFT updates~~ (Done — server-side)
+**Status:** Implemented via `src/server/trainer_worker.py`. PEFT LoRA adapters are trained server-side on uploaded trajectories using SFT + KL distillation loss with EMA teacher (cloned LoRA weights only). Adapters are hot-loaded into vLLM after training.
+**Remaining:** Wire automatic trajectory upload after each run when using `remote_vllm` backend. Test end-to-end training loop on RunPod.
 
 ---
 
@@ -129,7 +130,7 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 4. **1.3** -- Update budget (safety).
 5. **2.1** -- Checkpoint integration (safety story).
 6. **3.2** -- Config from file (quality of life).
-7. **2.2** -- Learnable adapter + real SDFT (core learning).
+7. ~~**2.2** -- Learnable adapter + real SDFT~~ (Done server-side — test end-to-end on RunPod).
 8. Then **3.1**, **3.3**, **4.x** as needed for demo and scale.
 
 ---

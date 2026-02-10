@@ -9,6 +9,10 @@ from src.policy.multimodal_policy import MultimodalPolicy
 from src.sdft.sdft_module import SDFTModule
 from src.agent.action_parser import ActionParser
 from src.utils.config import AgentConfig
+from src.utils.file_download import (
+    check_url_is_file, download_via_context,
+    page_looks_empty, url_has_file_extension,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -24,7 +28,8 @@ Actions: CLICK (element_id required), TYPE (element_id + value), PRESS_ENTER, SC
 
 Rules:
 - IDs must come from DOM_SUMMARY. Never invent IDs.
-- Check ACTION HISTORY — do not repeat failed or completed actions.
+- NAVIGATE URLs must come from links in DOM_SUMMARY. NEVER invent or guess URLs.
+- Check ACTION HISTORY — do not repeat failed or completed actions. If stuck, try FINISH.
 - After TYPE, you MUST press PRESS_ENTER to submit before using FINISH.
 - Do NOT use FINISH until the page shows actual results. FINISH value must be real data from PAGE TEXT below, never your own search query.
 {error_section}
@@ -39,7 +44,7 @@ MAX_HISTORY = 5
 
 
 class AgentRuntime:
-    def __init__(self, config: AgentConfig, policy: Optional[MultimodalPolicy] = None, sdft: Optional[SDFTModule] = None):
+    def __init__(self, config: AgentConfig, policy: Optional[MultimodalPolicy] = None, sdft: Optional[SDFTModule] = None, trajectory_uploader=None):
         self.config = config
         self.session_manager = SessionManager(headless=config.headless)
         self.action_executor = None
@@ -54,9 +59,14 @@ class AgentRuntime:
         self.action_parser = ActionParser()
         self.last_error: Optional[str] = None
         self.action_history: List[str] = []
+        self.trajectory_uploader = trajectory_uploader
 
-    def start(self, start_url: str):
-        """Initializes the browser session."""
+    def start(self, start_url: str) -> Optional[str]:
+        """Initializes the browser session.
+
+        Returns a filepath if the start URL was a file download (agent loop
+        should be skipped), or None for normal operation.
+        """
         page = self.session_manager.start()
         page.set_viewport_size({"width": self.config.viewport_width, "height": self.config.viewport_height})
 
@@ -65,9 +75,20 @@ class AgentRuntime:
         self.dom_snapshotter = DOMSnapshotter(page)
         self.session_manager.navigate(start_url)
 
+        # Pre-navigation file check
+        is_file, content_type = check_url_is_file(start_url)
+        if is_file:
+            logger.info(f"Start URL is a file ({content_type}). Downloading directly.")
+            filepath = download_via_context(self.session_manager.context.request, start_url)
+            if filepath:
+                return filepath
+            logger.warning("Direct download failed, continuing with agent loop.")
+
         if self.policy:
             if not self.policy.model:
                  self.policy.load_model()
+
+        return None
 
     def _format_history(self) -> str:
         if not self.action_history:
@@ -117,6 +138,42 @@ class AgentRuntime:
 
         # 1. Observe
         dom = self.dom_snapshotter.capture()
+
+        # Runtime guard: detect file/binary pages
+        current_url = self.action_executor.page.url
+        auto_download = page_looks_empty(dom) and url_has_file_extension(current_url)
+
+        # Second check: page text missing (e.g. PDF rendered in browser viewer).
+        # The viewer has interactive elements so page_looks_empty returns False,
+        # and URLs like arxiv.org/pdf/ID have no file extension.
+        if not auto_download:
+            has_page_text = "PAGE TEXT" in dom and len(dom.split("PAGE TEXT:", 1)[1].strip()) > 20
+            if not has_page_text:
+                is_file, ct = check_url_is_file(current_url)
+                if is_file:
+                    logger.info(f"File detected via content-type ({ct}): {current_url}")
+                    auto_download = True
+
+        if auto_download:
+            logger.info(f"File page detected: {current_url}")
+            filepath = download_via_context(self.session_manager.context.request, current_url)
+            if filepath:
+                logger.info(f"Auto-downloaded: {filepath}")
+                screenshot = self.visual_capture.capture()
+                finish_action = {
+                    "type": "finish",
+                    "params": {"value": f"Downloaded: {filepath}"},
+                    "metadata": {"reasoning": "File page detected, downloaded automatically."},
+                    "final_answer": filepath,
+                }
+                self._record_action(finish_action, True)
+                self.logger.log_step(
+                    step_id=self.step_count, dom=dom, screenshot=screenshot,
+                    action=finish_action, reward=1.0, done=True,
+                )
+                self.step_count += 1
+                return True, True
+
         screenshot = self.visual_capture.capture()
 
         # 2. Predict Action (if not provided manually)
@@ -156,6 +213,46 @@ class AgentRuntime:
                 logger.info("Guard: overriding premature FINISH → PRESS_ENTER (search not submitted yet)")
                 action_dict = {"type": "press_enter", "params": {}}
 
+        # Guard: after a failed CLICK with a pending TYPE (no PRESS_ENTER yet), force PRESS_ENTER.
+        # First CLICK attempt is always allowed; this only triggers on retry after failure.
+        if (action_dict.get("type") == "click"
+                and self.last_error
+                and "CLICK" in self.last_error.upper()
+                and any("TYPE" in h for h in self.action_history)
+                and not any("PRESS_ENTER" in h for h in self.action_history)):
+            logger.info("Guard: CLICK failed with pending TYPE — forcing PRESS_ENTER")
+            action_dict = {"type": "press_enter", "params": {}}
+
+        # Guard: loop detection — if the same action repeated 3+ times AND the current
+        # action also matches the loop pattern, force FINISH.  If the model chose a
+        # *different* action (e.g. NAVIGATE after 3x CLICK), let it through.
+        if len(self.action_history) >= 3:
+            last_three = self.action_history[-3:]
+            # Extract action signature: strip "Step N: " prefix, compare type+target before "->"
+            def _sig(h):
+                after_colon = h.split(": ", 1)[1] if ": " in h else h
+                return after_colon.split("->")[0].strip()
+            signatures = [_sig(h) for h in last_three]
+
+            # Build current action signature
+            cur_type = action_dict.get("type", "?").upper()
+            cur_target = action_dict.get("params", {}).get("element_id", "")
+            cur_value = action_dict.get("params", {}).get("value", "")
+            cur_parts = [cur_type]
+            if cur_target:
+                cur_parts.append(f"on {cur_target}")
+            if cur_value:
+                cur_parts.append(f'"{cur_value}"')
+            current_sig = " ".join(cur_parts)
+
+            if signatures[0] == signatures[1] == signatures[2] == current_sig:
+                logger.info("Guard: loop detected (same action 3x + current matches). Forcing FINISH.")
+                action_dict = {
+                    "type": "finish",
+                    "params": {"value": "Agent stuck in loop — could not complete task."},
+                    "metadata": {"reasoning": "Loop detected: same action repeated 3 times."},
+                }
+
         # 3. Act
         success, error_reason = self.action_executor.execute(action_dict.get("type"), action_dict.get("params", {}))
 
@@ -166,6 +263,12 @@ class AgentRuntime:
             action_type = action_dict.get("type", "unknown")
             target = action_dict.get("params", {}).get("element_id", "none")
             self.last_error = f"{action_type.upper()} on {target}: {error_reason}"
+            # Hint: if CLICK failed and there's a pending TYPE, suggest PRESS_ENTER
+            if action_type == "click":
+                has_type = any("TYPE" in h for h in self.action_history)
+                has_enter = any("PRESS_ENTER" in h for h in self.action_history)
+                if has_type and not has_enter:
+                    self.last_error += " Hint: use PRESS_ENTER to submit your search query."
 
         # Record to history
         self._record_action(action_dict, success)
@@ -200,4 +303,10 @@ class AgentRuntime:
         """Cleanup."""
         path = self.logger.save_trajectory()
         logger.info(f"Trajectory saved to {path}")
+        if self.trajectory_uploader:
+            try:
+                traj_id = self.trajectory_uploader.upload(self.config.log_dir)
+                logger.info(f"Trajectory uploaded to server: {traj_id}")
+            except Exception as e:
+                logger.warning(f"Trajectory upload failed: {e}")
         self.session_manager.close()

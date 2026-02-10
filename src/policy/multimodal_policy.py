@@ -10,6 +10,16 @@ try:
 except ImportError:
     MLXPolicy = None
 
+try:
+    from src.policy.nim_policy import NIMPolicy
+except ImportError:
+    NIMPolicy = None
+
+try:
+    from src.policy.remote_vllm_policy import RemoteVLLMPolicy
+except ImportError:
+    RemoteVLLMPolicy = None
+
 class MultimodalPolicy(nn.Module):
     def __init__(self, 
                  model_id: str = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", 
@@ -35,6 +45,16 @@ class MultimodalPolicy(nn.Module):
             # Default to Qwen2-VL-2B-4bit if using default Nemotron (which MLX might not support well yet or we prefer Qwen)
             # or just let the user specify. Ideally we swap the default for them in main.py.
             self.impl = MLXPolicy(model_id)
+        elif backend == "nim":
+            print("Initializing NIMPolicy")
+            if NIMPolicy is None:
+                raise ImportError("NIMPolicy could not be imported. Ensure requests is installed.")
+            self.impl = NIMPolicy(model_id)
+        elif backend == "remote_vllm":
+            print("Initializing RemoteVLLMPolicy")
+            if RemoteVLLMPolicy is None:
+                raise ImportError("RemoteVLLMPolicy could not be imported.")
+            self.impl = RemoteVLLMPolicy(model_id)
         else:
             print("Initializing TransformersPolicy")
             self.impl = TransformersPolicy(model_id, device)

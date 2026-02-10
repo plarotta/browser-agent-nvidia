@@ -12,8 +12,9 @@ class AgentConfig:
     device: str = "cuda"
 
     # Inference Backend
-    backend: str = "transformers" # "transformers", "tensorrt", or "mlx"
+    backend: str = "transformers" # "transformers", "tensorrt", "mlx", "nim", or "remote_vllm"
     engine_dir: Optional[str] = None # Path to TRT engine if backend is tensorrt
+    server_url: str = "http://localhost:8080"
 
     # Browser
     headless: bool = True

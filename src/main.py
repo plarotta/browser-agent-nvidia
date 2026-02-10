@@ -1,3 +1,4 @@
+import os
 import click
 from src.utils.config import AgentConfig
 from src.agent.agent_runtime import AgentRuntime
@@ -34,12 +35,13 @@ def record(url, task):
 @click.option("--goal", required=True, help="Natural language goal for the agent (e.g. 'Log in to the website')")
 @click.option("--headless/--no-headless", default=True, help="Run in headless mode")
 @click.option("--train/--no-train", default=False, help="Enable online training (SDFT)")
-@click.option("--backend", default="transformers", type=click.Choice(["transformers", "tensorrt", "mlx"]), help="Inference backend")
+@click.option("--backend", default="transformers", type=click.Choice(["transformers", "tensorrt", "mlx", "nim", "remote_vllm"]), help="Inference backend")
 @click.option("--engine-dir", default=None, help="Path to TensorRT engine (required for tensorrt backend)")
 @click.option("--url", default="https://google.com", help="Starting URL for the task")
 @click.option("--max-steps", default=15, help="Maximum number of agent steps")
 @click.option("--model-id", default=None, help="Override the model ID (e.g. mlx-community/gemma-3-12b-it-qat-4bit)")
-def run(task, goal, headless, train, backend, engine_dir, url, max_steps, model_id):
+@click.option("--server-url", default=None, help="Remote vLLM server URL (for remote_vllm backend)")
+def run(task, goal, headless, train, backend, engine_dir, url, max_steps, model_id, server_url):
     """Run the agent on a specific task."""
     logger.info(f"Running task '{task}' (Training: {train}, Backend: {backend})")
     logger.info(f"Goal: {goal}")
@@ -60,6 +62,12 @@ def run(task, goal, headless, train, backend, engine_dir, url, max_steps, model_
     elif backend == "mlx" and config.model_id == "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1":
         config.model_id = "mlx-community/gemma-3-12b-it-qat-4bit"
         logger.info(f"Using MLX default model: {config.model_id}")
+    elif backend == "nim" and config.model_id == "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1":
+        config.model_id = "nvidia/nemotron-nano-12b-v2-vl"
+        logger.info(f"Using NIM default model: {config.model_id}")
+    elif backend == "remote_vllm" and config.model_id == "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1":
+        config.model_id = "nvidia/Nemotron-Nano-12B-v2-VL-BF16"
+        logger.info(f"Using remote vLLM default model: {config.model_id}")
     
     # Initialize Policy
     # Note: In real usage, we would check for GPU availability here
@@ -74,7 +82,14 @@ def run(task, goal, headless, train, backend, engine_dir, url, max_steps, model_
         backend=config.backend,
         engine_dir=config.engine_dir
     )
-    
+
+    # Set server URL for remote_vllm backend
+    if backend == "remote_vllm":
+        resolved_url = server_url or os.environ.get("VLLM_SERVER_URL", config.server_url)
+        policy.impl.server_url = resolved_url
+        config.server_url = resolved_url
+        logger.info(f"Remote vLLM server: {resolved_url}")
+
     # Initialize SDFT if training enabled
     sdft = None
     if train:
@@ -87,16 +102,19 @@ def run(task, goal, headless, train, backend, engine_dir, url, max_steps, model_
     agent = AgentRuntime(config=config, policy=policy, sdft=sdft)
     
     try:
-        agent.start(start_url=url)
-        
-        # Run loop (stop on task done or max_steps)
-        for _ in range(max_steps):
-            success, done = agent.step()
-            if not success:
-                logger.warning("Step failed.")
-            if done:
-                logger.info("Task complete: stopping.")
-                break
+        download_path = agent.start(start_url=url)
+
+        if download_path:
+            logger.info(f"File downloaded: {download_path}")
+        else:
+            # Run loop (stop on task done or max_steps)
+            for _ in range(max_steps):
+                success, done = agent.step()
+                if not success:
+                    logger.warning("Step failed.")
+                if done:
+                    logger.info("Task complete: stopping.")
+                    break
                
     except KeyboardInterrupt:
         logger.info("Stopping agent...")
@@ -109,6 +127,27 @@ def status():
     click.echo("Agent Status: Online")
     click.echo("Base Model: Llama 3.2 Vision")
     click.echo(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
+
+@cli.command()
+@click.option("--model-id", default="nvidia/Nemotron-Nano-12B-v2-VL-BF16", help="Model to serve")
+@click.option("--host", default="0.0.0.0", help="Server host")
+@click.option("--port", default=8080, help="Server port")
+@click.option("--vllm-url", default="http://localhost:8000", help="vLLM backend URL")
+@click.option("--adapters-dir", default="./adapters", help="Directory for LoRA adapters")
+@click.option("--trajectories-dir", default="./trajectories", help="Directory for uploaded trajectories")
+def serve(model_id, host, port, vllm_url, adapters_dir, trajectories_dir):
+    """Start the FastAPI control plane server (GPU box)."""
+    import uvicorn
+    from src.server.api import create_app
+
+    logger.info(f"Starting server: model={model_id}, vllm={vllm_url}")
+    app = create_app(
+        model_id=model_id,
+        vllm_url=vllm_url,
+        adapters_dir=adapters_dir,
+        trajectories_dir=trajectories_dir,
+    )
+    uvicorn.run(app, host=host, port=port)
 
 if __name__ == "__main__":
     cli()
