@@ -29,7 +29,7 @@ GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits)
 echo "Detected GPU memory: ${GPU_MEM} MiB"
 
 # Decide whether to enforce 4-bit + offload
-VLLM_ARGS="--host 0.0.0.0 --port $VLLM_PORT --enable-lora --max-lora-rank 64 --trust-remote-code --dtype bf16"
+VLLM_ARGS="--host 0.0.0.0 --port $VLLM_PORT --enable-lora --max-lora-rank 64 --trust-remote-code --dtype bfloat16"
 if [ "$GPU_MEM" -lt 32000 ]; then
     echo "GPU < 32GB: enabling 4-bit quantization + CPU offload to avoid OOM"
     VLLM_ARGS="$VLLM_ARGS --load-in-4bit --offload-dir /tmp"
