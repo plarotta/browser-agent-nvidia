@@ -10,12 +10,12 @@ API_PORT=8080
 ADAPTERS_DIR="./adapters"
 TRAJECTORIES_DIR="./trajectories"
 
-# Enable runtime LoRA updates
-export VLLM_ALLOW_RUNTIME_LORA_UPDATING=true
-
-# Memory management tweaks to avoid OOM
+# Quantization / memory management
+export VLLM_QUANTIZATION="4bit"        # Tells vLLM to use 4-bit quantization
+export VLLM_OFFLOAD_DIR="/tmp"         # CPU offload location
 export VLLM_NUM_ENGINE_PROCS=1
-export PYTORCH_CUDA_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:64,expandable_segments:True"
+export PYTORCH_ALLOC_CONF="garbage_collection_threshold:0.6,max_split_size_mb:64,expandable_segments:True"
+
 
 echo "=== Browser Agent Server ==="
 echo "Model: $MODEL_ID"
@@ -32,7 +32,7 @@ echo "Detected GPU memory: ${GPU_MEM} MiB"
 VLLM_ARGS="--host 0.0.0.0 --port $VLLM_PORT --enable-lora --max-lora-rank 64 --trust-remote-code --dtype bfloat16"
 if [ "$GPU_MEM" -lt 32000 ]; then
     echo "GPU < 32GB: enabling 4-bit quantization + CPU offload to avoid OOM"
-    VLLM_ARGS="$VLLM_ARGS --load-in-4bit --offload-dir /tmp"
+    VLLM_ARGS="$VLLM_ARGS
 fi
 
 # Start vLLM in background
