@@ -147,7 +147,8 @@ class AgentRuntime:
         # The viewer has interactive elements so page_looks_empty returns False,
         # and URLs like arxiv.org/pdf/ID have no file extension.
         if not auto_download:
-            has_page_text = "PAGE TEXT" in dom and len(dom.split("PAGE TEXT:", 1)[1].strip()) > 20
+            parts = dom.split("PAGE TEXT:", 1)
+            has_page_text = len(parts) > 1 and len(parts[1].strip()) > 20
             if not has_page_text:
                 is_file, ct = check_url_is_file(current_url)
                 if is_file:

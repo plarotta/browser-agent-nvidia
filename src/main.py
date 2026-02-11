@@ -19,16 +19,23 @@ def cli():
 @cli.command()
 @click.option("--url", required=True, help="URL to start recording from")
 @click.option("--task", required=True, help="Name of the task")
-def record(url, task):
-    """Record a new trajectory for a task."""
-    logger.info(f"Starting recording for task '{task}' at {url}...")
-    # Config loading could go here
-    config = AgentConfig(log_dir=f"logs/{task}", headless=False)
-    
-    agent = AgentRuntime(config=config)
-    agent.start(start_url=url)
-    input("Press Enter to stop recording via CLI (Concept)...")
-    agent.stop()
+@click.option("--goal", required=True, help="Natural language goal description")
+def record(url, task, goal):
+    """Record a human demonstration trajectory."""
+    import warnings
+    from src.recorder.human_recorder import HumanRecorder
+
+    logger.info(f"Starting recording for task '{task}' at {url}")
+    logger.info(f"Goal: {goal}")
+
+    recorder = HumanRecorder(log_dir=f"logs/{task}", goal=goal)
+    recorder.start(url)
+    path = recorder.run()  # blocks until Ctrl+C
+    logger.info(f"Trajectory saved to {path}")
+
+    # Suppress noisy asyncio errors from Playwright subprocess teardown
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message="coroutine.*was never awaited")
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 @cli.command()
 @click.option("--task", required=True, help="Task name to run")
@@ -120,6 +127,42 @@ def run(task, goal, headless, train, backend, engine_dir, url, max_steps, model_
         logger.info("Stopping agent...")
     finally:
         agent.stop()
+
+@cli.command()
+@click.option("--task", required=True, help="Task name (used for log dir path)")
+@click.option("--trajectory-dir", default=None, help="Path to trajectory dir (defaults to logs/{task}_run)")
+@click.option("--model-id", default=None, help="Model to fine-tune")
+@click.option("--adapter-path", default="./adapters/local", help="Where to save LoRA adapter")
+@click.option("--epochs", default=2, help="Training epochs (paper recommends 2)")
+@click.option("--lr", default=1e-5, type=float, help="Learning rate")
+@click.option("--lora-rank", default=16, help="LoRA rank")
+@click.option("--ema-alpha", default=0.02, type=float, help="EMA update rate for teacher")
+@click.option("--enrich/--no-enrich", default=True, help="Enrich teacher demos via NIM API (requires NVIDIA_API_KEY)")
+def train(task, trajectory_dir, model_id, adapter_path, epochs, lr, lora_rank, ema_alpha, enrich):
+    """Run SDFT training on collected trajectories (MLX, Apple Silicon)."""
+    from src.sdft.sdft_trainer_mlx import run_sdft_training
+
+    if trajectory_dir is None:
+        trajectory_dir = f"logs/{task}_run"
+
+    if model_id is None:
+        model_id = "mlx-community/gemma-3-12b-it-qat-4bit"
+
+    logger.info(f"SDFT Training: task={task}, model={model_id}")
+    logger.info(f"Trajectory dir: {trajectory_dir}, Adapter path: {adapter_path}")
+
+    result = run_sdft_training(
+        model_id=model_id,
+        trajectory_dirs=[trajectory_dir],
+        adapter_save_path=adapter_path,
+        num_epochs=epochs,
+        learning_rate=lr,
+        lora_rank=lora_rank,
+        ema_alpha=ema_alpha,
+        enrich=enrich,
+    )
+
+    logger.info(f"Training result: {result}")
 
 @cli.command()
 def status():

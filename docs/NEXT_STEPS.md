@@ -19,6 +19,8 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 - **LoRA adapter lifecycle:** Hot-load/unload adapters via vLLM's dynamic LoRA API. Adapter metadata tracked in `adapters_meta.json`.
 - **Trajectory upload:** Client packages log_dir as tar.gz, uploads to server. Server stores and uses for training.
 - **NIM backend:** NVIDIA cloud API inference via NIMPolicy.
+- **MLX SDFT trainer:** Full SDFT training loop on Apple Silicon (`sdft_trainer_mlx.py`): on-policy rollout, teacher/student KL loss, EMA teacher update, LoRA adapter save via `train` CLI command.
+- **NIM-enriched teacher demonstrations:** Optional `--enrich` flag calls NIM VLM API to generate rich ICL demonstrations (page context, element rationale, expected outcome) for the teacher. Graceful fallback to raw action JSON when API is unavailable.
 
 ---
 

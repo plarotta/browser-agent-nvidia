@@ -13,7 +13,8 @@ For system design and architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 - **Remote vLLM server**: Host Nemotron on a GPU box (e.g. RunPod) with LoRA hot-swapping, trajectory upload, and SDFT training — the Mac runs only the browser agent.
 - **Compact, truncation-safe prompt**: Output format instructions come first so the model always sees them, even when DOM is long.
 - **Programmatic guards**: Prevents common small-model mistakes (e.g. skipping submit after typing).
-- **Deployment-time adaptation**: SDFT with PEFT LoRA adapters, trainable on uploaded trajectories via the server.
+- **Deployment-time adaptation**: SDFT with PEFT LoRA adapters, trainable on uploaded trajectories via the server or locally on Apple Silicon via MLX.
+- **NIM-enriched teacher demos**: Optionally calls the NIM VLM API during training to generate rich explanations of expert actions, improving teacher logit quality.
 - **Consumer hardware**: Targets NVIDIA RTX 3090/4090; MLX for Mac (tested on M4/24GB with 12B-4bit).
 
 ## Installation
@@ -55,7 +56,7 @@ uv run python -m src.main run --task "demo" --goal "Search for flights to NYC" -
 **Options:**
 
 | Option | Description | Default |
-|--------|-------------|---------|
+| -------- | ------------- | --------- |
 | `--backend` | `transformers`, `tensorrt`, `mlx`, `nim`, or `remote_vllm` | `transformers` |
 | `--engine-dir` | Path to TensorRT engine (for `tensorrt`) | -- |
 | `--model-id` | Override model (e.g. `mlx-community/gemma-3-12b-it-qat-4bit`) | backend-dependent |
@@ -86,6 +87,36 @@ uv run python -m src.main run --task "demo" --goal "Search for X" --backend mlx 
 uv run python -m src.main run --task "demo" --goal "Complete the task" --train --no-headless
 ```
 
+### Train an adapter (MLX, Apple Silicon)
+
+Run SDFT training on collected trajectories to produce a LoRA adapter.
+
+```bash
+# Basic (raw expert actions as teacher demos)
+uv run python -m src.main train --task "demo" --no-enrich
+
+# With NIM-enriched teacher demos (recommended, requires NVIDIA_API_KEY)
+NVIDIA_API_KEY=nvapi-... uv run python -m src.main train --task "demo" --enrich
+```
+
+**Options:**
+
+| Option | Description | Default |
+| -------- | ------------- | --------- |
+| `--task` | Task name (trajectory loaded from `logs/{task}_run`) | required |
+| `--trajectory-dir` | Override trajectory directory | `logs/{task}_run` |
+| `--model-id` | Model to fine-tune | `mlx-community/gemma-3-12b-it-qat-4bit` |
+| `--adapter-path` | Where to save LoRA adapter | `./adapters/local` |
+| `--epochs` | Training epochs | `2` |
+| `--lr` | Learning rate | `1e-5` |
+| `--lora-rank` | LoRA rank | `16` |
+| `--ema-alpha` | EMA update rate for teacher | `0.02` |
+| `--enrich/--no-enrich` | Enrich teacher demos via NIM API | `--enrich` |
+
+When `--enrich` is enabled and `NVIDIA_API_KEY` is set, each training sample is sent to the NIM VLM to generate a rich explanation of *why* the expert action is correct (page context, element rationale, expected outcome). This produces more informative teacher logits. If the API key is missing or a call fails, training falls back to raw action JSON seamlessly.
+
+See [TRAINING_PLAN.md](TRAINING_PLAN.md) for a step-by-step walkthrough.
+
 ### Start the server (GPU box)
 
 On a GPU machine (e.g. RunPod), start the vLLM inference server + FastAPI control plane:
@@ -107,7 +138,7 @@ uv run python -m src.main serve \
 **Server endpoints:**
 
 | Endpoint | Method | Purpose |
-|----------|--------|---------|
+| ---------- | -------- | --------- |
 | `/health` | GET | Health check, vLLM status, active adapter |
 | `/act` | POST | Inference (prompt + screenshot) |
 | `/upload_trajectory` | POST | Upload trajectory tar.gz for training |
@@ -148,14 +179,14 @@ Edit `src/utils/config.py` for defaults: `model_id`, `device`, `backend`, `engin
 ## Project structure
 
 | Path | Purpose |
-|------|---------|
+| ------ | --------- |
 | `src/agent/` | Agent runtime (step loop, prompt, guards), action parser |
 | `src/browser_interaction/` | Playwright session manager, action executor |
 | `src/observation/` | DOM snapshotter (elements + page text), visual capture |
 | `src/policy/` | Multimodal policy dispatch, backend implementations (Transformers, TensorRT, MLX, NIM, Remote vLLM) |
 | `src/server/` | FastAPI control plane (`api.py`), LoRA adapter manager, SDFT trainer worker |
 | `src/shared/` | Pydantic request/response schemas shared between client and server |
-| `src/sdft/` | Self-distillation (EMA teacher, gating, loss) |
+| `src/sdft/` | Self-distillation: EMA teacher/gating (`sdft_module.py`), MLX SDFT trainer with NIM-enriched demos (`sdft_trainer_mlx.py`) |
 | `src/safety/` | Checkpoint save/load/rollback |
 | `src/evaluation/` | Goal spec, success checker (not used in runtime; available for offline evaluation) |
 | `src/utils/` | Config, trajectory logger, trajectory uploader |
