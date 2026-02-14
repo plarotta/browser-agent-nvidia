@@ -15,6 +15,32 @@ logger = logging.getLogger(__name__)
 MLX_MAX_PROMPT_CHARS = 3000
 
 
+def _remap_peft_to_mlx(weights: dict) -> dict:
+    """Remap PEFT (PyTorch) LoRA weight keys to MLX format.
+
+    PEFT:  base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight
+    MLX:   model.layers.0.self_attn.q_proj.lora_a
+    """
+    remapped = {}
+    for key, value in weights.items():
+        new_key = key
+        # Strip PEFT prefix
+        if new_key.startswith("base_model.model."):
+            new_key = new_key[len("base_model.model."):]
+        # lora_A.weight -> lora_a, lora_B.weight -> lora_b
+        new_key = new_key.replace(".lora_A.weight", ".lora_a")
+        new_key = new_key.replace(".lora_B.weight", ".lora_b")
+        new_key = new_key.replace(".lora_A.default.weight", ".lora_a")
+        new_key = new_key.replace(".lora_B.default.weight", ".lora_b")
+        # Transpose: PEFT stores Linear weights as (out, in), MLX LoRA stores raw matrices
+        # lora_A: PEFT (rank, in_features) -> MLX (in_features, rank)
+        # lora_B: PEFT (out_features, rank) -> MLX (rank, out_features)
+        if new_key.endswith(".lora_a") or new_key.endswith(".lora_b"):
+            value = mx.transpose(value)
+        remapped[new_key] = value
+    return remapped
+
+
 class MLXPolicy:
     def __init__(self, model_id: str = "mlx-community/gemma-3-12b-it-qat-4bit", adapter_path: str = None):
         self.model_id = model_id
@@ -59,15 +85,23 @@ class MLXPolicy:
             freeze=True,
         )
 
-        # Load saved weights
-        adapter_file = os.path.join(self.adapter_path, "adapters.safetensors")
-        if os.path.exists(adapter_file):
-            weights = mx.load(adapter_file)
+        # Load saved weights — support both MLX and PEFT (PyTorch) formats
+        mlx_file = os.path.join(self.adapter_path, "adapters.safetensors")
+        peft_file = os.path.join(self.adapter_path, "adapter_model.safetensors")
+
+        if os.path.exists(mlx_file):
+            weights = mx.load(mlx_file)
             self.model.load_weights(list(weights.items()), strict=False)
             mx.eval(self.model.parameters())
-            logger.info(f"Loaded adapter weights from {adapter_file}")
+            logger.info(f"Loaded MLX adapter weights from {mlx_file}")
+        elif os.path.exists(peft_file):
+            weights = mx.load(peft_file)
+            remapped = _remap_peft_to_mlx(weights)
+            self.model.load_weights(list(remapped.items()), strict=False)
+            mx.eval(self.model.parameters())
+            logger.info(f"Loaded PEFT adapter weights from {peft_file} ({len(remapped)} keys remapped)")
         else:
-            logger.warning(f"No adapters.safetensors found in {self.adapter_path}")
+            logger.warning(f"No adapter weights found in {self.adapter_path}")
 
     def _get_model_type(self) -> str:
         if isinstance(self.config, dict):
