@@ -28,6 +28,7 @@ server = [
     "uvicorn>=0.34.0",
     "peft>=0.14.0",
     "python-multipart>=0.0.18",
+    "bitsandbytes>=0.45.0",
 ]
 wandb = [
     "wandb>=0.17.0",

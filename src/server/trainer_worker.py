@@ -104,8 +104,8 @@ def run_training(
 
     Returns dict with training stats.
     """
-    from transformers import AutoModelForCausalLM, AutoProcessor
-    from peft import LoraConfig, get_peft_model, PeftModel
+    from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
+    from peft import LoraConfig, get_peft_model, PeftModel, prepare_model_for_kbit_training
 
     # ── W&B setup ──
     wb_run = None
@@ -133,12 +133,21 @@ def run_training(
 
     logger.info(f"Loading base model: {model_id}")
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+    # Load in 4-bit to fit 12B models on 24-48GB GPUs with room for training
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.bfloat16,
+        quantization_config=bnb_config,
         device_map="auto",
         trust_remote_code=True,
     )
+    model = prepare_model_for_kbit_training(model)
 
     # Apply or resume LoRA
     if resume_from and os.path.exists(resume_from):
@@ -228,7 +237,7 @@ def run_training(
                     **student_inputs,
                     do_sample=True,
                     temperature=1.0,
-                    max_new_tokens=256,
+                    max_new_tokens=128,
                 )
             # Extract only the generated tokens (after the prompt)
             prompt_len = student_inputs["input_ids"].shape[1]
