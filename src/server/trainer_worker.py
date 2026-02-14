@@ -232,6 +232,10 @@ def run_training(
                 return_tensors="pt",
             ).to(model.device)
 
+            # Disable gradient checkpointing during generate() so KV cache works.
+            # Gemma 3's vision masking breaks without KV cache (image_group_ids
+            # index out of bounds on the growing sequence).
+            model.gradient_checkpointing_disable()
             with torch.no_grad():
                 rollout_output = model.generate(
                     **student_inputs,
@@ -239,6 +243,7 @@ def run_training(
                     temperature=1.0,
                     max_new_tokens=128,
                 )
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
             # Extract only the generated tokens (after the prompt)
             prompt_len = student_inputs["input_ids"].shape[1]
             rollout_ids = rollout_output[:, prompt_len:]  # (1, R)
@@ -276,9 +281,15 @@ def run_training(
                 "input_ids": t_full_ids,
                 "attention_mask": t_attention,
             }
-            # Pass through pixel_values if present
+            # Pass through pixel_values and token_type_ids if present
             if "pixel_values" in teacher_inputs:
                 t_forward_inputs["pixel_values"] = teacher_inputs["pixel_values"]
+            if "token_type_ids" in teacher_inputs:
+                # Extend token_type_ids: rollout tokens are text (0)
+                t_forward_inputs["token_type_ids"] = torch.cat([
+                    teacher_inputs["token_type_ids"],
+                    torch.zeros_like(rollout_ids),
+                ], dim=1)
 
             with torch.no_grad():
                 teacher_outputs = model(**t_forward_inputs)
@@ -303,6 +314,11 @@ def run_training(
             }
             if "pixel_values" in student_inputs:
                 s_forward_inputs["pixel_values"] = student_inputs["pixel_values"]
+            if "token_type_ids" in student_inputs:
+                s_forward_inputs["token_type_ids"] = torch.cat([
+                    student_inputs["token_type_ids"],
+                    torch.zeros_like(rollout_ids),
+                ], dim=1)
 
             student_outputs = model(**s_forward_inputs)
             student_logits = student_outputs.logits[:, prompt_len - 1:prompt_len + num_rollout - 1, :]
