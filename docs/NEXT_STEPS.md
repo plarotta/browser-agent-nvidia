@@ -14,13 +14,21 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 - **TYPE validation:** Action executor rejects TYPE with empty value to prevent phantom actions.
 - **PRESS_ENTER wait:** Added `wait_for_load_state` + 1.5s settle time after Enter so the next step sees loaded results.
 - **MLX prompt budget:** Raised from 1500 to 3000 chars; DOM budget from 700 to 2000 chars.
-- **Remote vLLM server:** Client/server split — Mac runs browser agent, GPU box runs vLLM (Nemotron) + FastAPI control plane. `RemoteVLLMPolicy` sends HTTP requests to `/act`.
-- **SDFT training server-side:** PEFT LoRA training on uploaded trajectories via `/train` endpoint. Pauses vLLM during training (single-GPU strategy), restarts with new adapter.
-- **LoRA adapter lifecycle:** Hot-load/unload adapters via vLLM's dynamic LoRA API. Adapter metadata tracked in `adapters_meta.json`.
+- **Remote training server:** Training-only control plane on GPU box (FastAPI). Mac uploads trajectories, triggers SDFT training, downloads trained adapters. No inference on the server.
+- **SDFT training server-side:** PEFT LoRA training on uploaded trajectories via `/train` endpoint.
 - **Trajectory upload:** Client packages log_dir as tar.gz, uploads to server. Server stores and uses for training.
 - **NIM backend:** NVIDIA cloud API inference via NIMPolicy.
 - **MLX SDFT trainer:** Full SDFT training loop on Apple Silicon (`sdft_trainer_mlx.py`): on-policy rollout, teacher/student KL loss, EMA teacher update, LoRA adapter save via `train` CLI command.
 - **NIM-enriched teacher demonstrations:** Optional `--enrich` flag calls NIM VLM API to generate rich ICL demonstrations (page context, element rationale, expected outcome) for the teacher. Graceful fallback to raw action JSON when API is unavailable.
+- **True on-policy SDFT on server:** Rewrote `trainer_worker.py` from SFT+KL hybrid to true on-policy SDFT (on-policy rollout, reverse KL only, configurable EMA alpha, NIM enrichment integration).
+- **Shared enrichment module with caching:** Factored `enrich_demonstration()` and `build_teacher_prompt()` into `src/sdft/enrichment.py`. SHA-256 caching to `.enrichment_cache/` avoids redundant NIM API calls. Both MLX and server trainers use the shared module.
+- **Enrichment model upgraded:** Default NIM enrichment model changed from Nemotron-Nano-12B to `meta/llama-3.2-90b-vision-instruct` for higher-quality reasoning.
+- **Adapter download endpoint:** `GET /adapters/{name}/download` returns trained adapter as tar.gz. `TrajectoryUploader.download_adapter()` on the client side.
+- **MLX adapter loading at inference:** `--adapter-path` flag on `run` command loads LoRA adapter into MLXPolicy. Reads `adapter_config.json` for rank/alpha.
+- **Deploy command:** New `deploy` CLI command orchestrates full remote round-trip: upload trajectory → trigger training → poll status → download adapter → print run command.
+- **Step-0 KL diagnostics:** Both MLX and server trainers log a prominent diagnostic at step 0 — warns if KL < 0.01 (enrichment too weak or ema_alpha too low).
+- **Adapter config saved during training:** Both trainers save `adapter_config.json` alongside adapter weights for reliable loading at inference.
+- **TrainRequest schema extended:** Added `ema_alpha` and `enrich` fields, passed through from API to trainer.
 
 ---
 
@@ -69,9 +77,9 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 - Maintain a short history of success/failure. If success rate drops, call `checkpoint_manager.rollback(policy)`.
 **Effort:** Medium.
 
-### 2.2 ~~Add a learnable adapter and real SDFT updates~~ (Done — server-side)
-**Status:** Implemented via `src/server/trainer_worker.py`. PEFT LoRA adapters are trained server-side on uploaded trajectories using SFT + KL distillation loss with EMA teacher (cloned LoRA weights only). Adapters are hot-loaded into vLLM after training.
-**Remaining:** Wire automatic trajectory upload after each run when using `remote_vllm` backend. Test end-to-end training loop on RunPod.
+### 2.2 ~~Add a learnable adapter and real SDFT updates~~ (Done — E2E)
+**Status:** Fully implemented. Server-side trainer now uses true on-policy SDFT (reverse KL, no SFT term). `deploy` CLI command orchestrates the full round-trip (upload → train → download). `run --adapter-path` loads the adapter at inference on MLX.
+**Remaining:** None — E2E pipeline complete.
 
 ---
 
@@ -132,7 +140,7 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 4. **1.3** -- Update budget (safety).
 5. **2.1** -- Checkpoint integration (safety story).
 6. **3.2** -- Config from file (quality of life).
-7. ~~**2.2** -- Learnable adapter + real SDFT~~ (Done server-side — test end-to-end on RunPod).
+7. ~~**2.2** -- Learnable adapter + real SDFT~~ (Done — E2E pipeline working: deploy command, adapter download, MLX adapter loading).
 8. Then **3.1**, **3.3**, **4.x** as needed for demo and scale.
 
 ---

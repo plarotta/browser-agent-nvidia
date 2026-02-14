@@ -27,8 +27,10 @@ server = [
     "fastapi>=0.115.0",
     "uvicorn>=0.34.0",
     "peft>=0.14.0",
-    "openai>=1.50.0",
     "python-multipart>=0.0.18",
+]
+wandb = [
+    "wandb>=0.17.0",
 ]
 
 [dependency-groups]

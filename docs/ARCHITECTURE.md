@@ -58,22 +58,21 @@ The system is a **browser automation agent** that:
               └───────────────┘
 ```
 
-### Remote Mode (client/server split)
+### Remote Training Mode (Mac + GPU server)
 
 ```
-Mac (consumer)                          RunPod GPU box (server)
-──────────────                          ──────────────────────
-Browser + Playwright                    vLLM (Nemotron, LoRA-enabled)
-Observation pipeline                    FastAPI control plane
-Agent loop                                /act   → vLLM inference
-RemoteVLLMPolicy ──── HTTP ────────→      /train → SDFT with PEFT LoRA
-TrajectoryLogger                          /upload_trajectory
-  └─ TrajectoryUploader ── HTTP ──→       /adapters/* (LoRA lifecycle)
-                                        Trainer worker (pauses vLLM during training)
+Mac (consumer)                          RunPod GPU box (training server)
+──────────────                          ────────────────────────────────
+Browser + Playwright                    FastAPI training control plane
+Observation pipeline                      /upload_trajectory
+Agent loop (local inference via MLX)      /train → SDFT with PEFT LoRA
+TrajectoryLogger                          /train/status
+  └─ TrajectoryUploader ── HTTP ──→       /adapters/* (list + download)
+                                        Trainer worker (SDFT on GPU)
                                         Adapter storage (/adapters/)
 ```
 
-In remote mode, the Mac runs `--backend remote_vllm`. The prompt is built locally (same `agent_runtime._build_prompt()`), then sent with the screenshot to the server's `/act` endpoint. Training happens server-side: trajectories are uploaded, then `/train` triggers SDFT with PEFT LoRA on the GPU.
+All inference runs locally on the Mac (MLX, Transformers, TensorRT, or NIM). The remote GPU server is used only for training LoRA adapters. Trajectories are uploaded via `deploy`, training runs server-side, and the trained adapter is downloaded back to the Mac for local inference.
 
 ---
 
@@ -88,7 +87,7 @@ In remote mode, the Mac runs `--backend remote_vllm`. The prompt is built locall
 
    For MLX backend, DOM is capped at 2000 chars; total prompt at 3000 chars.
 
-3. **Predict:** `MultimodalPolicy.forward(screenshot, prompt)` dispatches to the active backend (Transformers/TensorRT/MLX/NIM/Remote vLLM) and returns raw model text. In remote mode, this sends an HTTP POST to the server's `/act` endpoint.
+3. **Predict:** `MultimodalPolicy.forward(screenshot, prompt)` dispatches to the active backend (Transformers/TensorRT/MLX/NIM) and returns raw model text.
 
 4. **Parse:** `ActionParser.parse()` extracts the action in priority order:
    - **JSON extraction:** Brace-balanced parser finds JSON objects with an `action` key.
@@ -115,56 +114,54 @@ In remote mode, the Mac runs `--backend remote_vllm`. The prompt is built locall
 
 | Component | Location | Status | Notes |
 | ----------- | ---------- | -------- | -------- |
-| **CLI** | `src/main.py` | Done | `record`, `run`, `train`, `status`, `serve`; backends: transformers, tensorrt, mlx, nim, remote_vllm; `--model-id`, `--server-url`, `--enrich/--no-enrich` |
+| **CLI** | `src/main.py` | Done | `record`, `run`, `train`, `deploy`, `status`, `serve`; backends: transformers, tensorrt, mlx, nim; `--model-id`, `--adapter-path`, `--enrich/--no-enrich` |
 | **Agent runtime** | `src/agent/agent_runtime.py` | Done | Step loop, truncation-safe prompt, guards, FINISH-based termination, optional trajectory upload |
 | **Action parser** | `src/agent/action_parser.py` | Done | JSON extraction, line-anchored fallback regex, done-language detection |
 | **Session manager** | `src/browser_interaction/session_manager.py` | Done | Playwright launch with stealth settings, navigate, close |
 | **Action executor** | `src/browser_interaction/action_executor.py` | Done | click, type (rejects empty), press_enter (waits for load), scroll, wait, navigate, finish |
 | **DOM snapshotter** | `src/observation/dom_snapshotter.py` | Done | Interactive elements with stable IDs + visible page text via `innerText` |
 | **Visual capture** | `src/observation/visual_capture.py` | Done | Screenshot for policy |
-| **Multimodal policy** | `src/policy/multimodal_policy.py` | Done | Dispatches to Transformers / TensorRT / MLX / NIM / Remote vLLM |
+| **Multimodal policy** | `src/policy/multimodal_policy.py` | Done | Dispatches to Transformers / TensorRT / MLX / NIM |
 | **Transformers policy** | `src/policy/transformers_policy.py` | Done | Hugging Face VLM inference |
 | **TensorRT policy** | `src/policy/tensorrt_policy.py` | Done | TRT engine inference |
-| **MLX policy** | `src/policy/mlx_policy.py` | Done | Apple Silicon VLM; 3000-char prompt limit; BOS-strip fix for mllama |
+| **MLX policy** | `src/policy/mlx_policy.py` | Done | Apple Silicon VLM; 3000-char prompt limit; BOS-strip fix for mllama; optional LoRA adapter loading via `--adapter-path` |
 | **NIM policy** | `src/policy/nim_policy.py` | Done | NVIDIA NIM cloud API inference |
-| **Remote vLLM policy** | `src/policy/remote_vllm_policy.py` | Done | HTTP client for self-hosted vLLM server; sends prompt + screenshot to `/act` |
-| **FastAPI server** | `src/server/api.py` | Done | Control plane: `/act`, `/train`, `/upload_trajectory`, `/adapters/*`, `/health` |
-| **Adapter manager** | `src/server/adapter_manager.py` | Done | LoRA adapter metadata, vLLM dynamic load/unload, vLLM process lifecycle |
-| **Trainer worker** | `src/server/trainer_worker.py` | Done | SDFT training with PEFT LoRA; teacher EMA via weight swap (not full model copy) |
+| **FastAPI server** | `src/server/api.py` | Done | Training control plane: `/train`, `/upload_trajectory`, `/adapters/*` (incl. download), `/health` |
+| **Trainer worker** | `src/server/trainer_worker.py` | Done | True on-policy SDFT with PEFT LoRA: on-policy rollout, reverse KL (no SFT term), EMA teacher via weight swap, NIM enrichment, step-0 KL diagnostics |
 | **Shared schemas** | `src/shared/schemas.py` | Done | Pydantic models for client-server communication |
 | **Adapter layer** | `src/policy/adapter_layer.py` | Present | Not yet wired as learnable head in run path |
 | **SDFT module** | `src/sdft/sdft_module.py` | Done | EMA teacher, KL loss, confidence/success gating; no actual gradient step yet |
-| **MLX SDFT trainer** | `src/sdft/sdft_trainer_mlx.py` | Done | Full SDFT training loop on Apple Silicon: on-policy rollout, teacher/student KL loss, EMA update, LoRA adapter save. Optional NIM-enriched teacher demonstrations |
+| **Enrichment module** | `src/sdft/enrichment.py` | Done | Shared NIM VLM enrichment (used by both MLX and server trainers). SHA-256 caching to `.enrichment_cache/` avoids redundant API calls |
+| **MLX SDFT trainer** | `src/sdft/sdft_trainer_mlx.py` | Done | Full SDFT training loop on Apple Silicon: on-policy rollout, teacher/student KL loss, EMA update, LoRA adapter save. NIM-enriched teacher demos with caching. Step-0 KL diagnostics. Saves `adapter_config.json` |
 | **Checkpoint manager** | `src/safety/checkpoint_manager.py` | Done | Save/load/rollback; not yet invoked from runtime |
 | **Evaluation** | `src/evaluation/` | Unused | GoalSpec, GoalInterpreter, SuccessChecker exist but are not used in runtime; available for offline eval |
-| **Config** | `src/utils/config.py` | Done | Model, backend, device, browser, learning, server_url, paths |
+| **Config** | `src/utils/config.py` | Done | Model, backend, device, browser, learning, paths |
 | **Trajectory logger** | `src/utils/trajectory_logger.py` | Done | Per-step log, save trajectory to disk |
-| **Trajectory uploader** | `src/utils/trajectory_uploader.py` | Done | Packages log_dir as tar.gz, uploads to server `/upload_trajectory` |
-| **Launch script** | `scripts/start_server.sh` | Done | Starts vLLM + FastAPI on RunPod |
+| **Trajectory uploader** | `src/utils/trajectory_uploader.py` | Done | Packages log_dir as tar.gz, uploads to server `/upload_trajectory`. Also downloads trained adapters via `/adapters/{name}/download` |
+| **Launch script** | `scripts/start_server.sh` | Done | Starts training server on RunPod |
 
 ---
 
-## 5. Remote vLLM Architecture
+## 5. Training Architecture
 
-The `remote_vllm` backend splits the system across two machines:
-
-**Client (Mac):** Runs browser (Playwright), observation pipeline, agent loop, action parsing, and guards. The `RemoteVLLMPolicy` sends HTTP requests — it does not load any model locally.
-
-**Server (GPU box):** Runs vLLM for Nemotron inference and a FastAPI control plane for orchestration.
-
-### Inference flow
-1. `agent_runtime._build_prompt()` constructs the full prompt locally (same as all backends).
-2. `RemoteVLLMPolicy.forward()` encodes the screenshot as base64 PNG, POSTs `{prompt, screenshot_base64}` to `/act`.
-3. The server wraps this into an OpenAI-compatible chat message (image before text, `/no_think` system prompt) and forwards to vLLM.
-4. Raw model output is returned; client-side `ActionParser` handles parsing.
-
-### Training flow (SDFT with PEFT LoRA)
+### Remote training flow (GPU server, on-policy SDFT with PEFT LoRA)
 1. Client uploads trajectory via `TrajectoryUploader` → `/upload_trajectory` (tar.gz of JSON + PNGs).
-2. Client POSTs `/train` with trajectory IDs and hyperparameters.
-3. Server **pauses vLLM** (single-GPU strategy) to free VRAM.
-4. `trainer_worker.run_training()` loads the base model + PEFT LoRA, trains with SFT + KL distillation loss.
-5. Teacher state is a `dict` of cloned LoRA tensors (~10-50MB), not a full model copy.
-6. After training, adapter is saved, vLLM is restarted with the new adapter preloaded.
+2. Client POSTs `/train` with trajectory IDs and hyperparameters (`ema_alpha`, `enrich`, etc.).
+3. `trainer_worker.run_training()` loads the base model + PEFT LoRA, runs true on-policy SDFT:
+   - On-policy rollout from student (`model.generate(do_sample=True, temperature=1.0)`)
+   - Optional NIM enrichment of expert demonstrations (via `src/sdft/enrichment.py`, with caching)
+   - Swap to EMA teacher weights, forward with ICL-enriched prompt on rollout tokens
+   - Reverse KL: `D_KL(student || teacher)` — no SFT term
+   - EMA teacher update with configurable `ema_alpha`
+4. Teacher state is a `dict` of cloned LoRA tensors (~10-50MB), not a full model copy.
+5. Step-0 KL diagnostic: warns if KL is near zero (enrichment too weak or `ema_alpha` too low).
+6. After training, adapter + `adapter_config.json` are saved.
+7. Client downloads the trained adapter via `GET /adapters/{name}/download` (tar.gz).
+
+### Deploy command (E2E round-trip)
+
+The `deploy` CLI command orchestrates the full remote pipeline from the Mac:
+1. Upload trajectory → 2. Trigger training → 3. Poll status → 4. Download adapter → 5. Print `run` command with adapter path.
 
 ### Local training flow (MLX SDFT)
 
@@ -174,10 +171,9 @@ For Apple Silicon users, SDFT training runs locally without a server:
 2. `train` command loads positive-reward steps from the trajectory.
 3. **(Optional) NIM enrichment:** If `--enrich` and `NVIDIA_API_KEY` is set, each sample's screenshot + DOM + expert action is sent to the NIM VLM API. The NIM model returns a rich explanation (page context, element rationale, expected outcome) that replaces the raw action JSON as the teacher's ICL demonstration. Falls back to raw actions on failure.
 4. For each sample: student rollout (no grad) -> teacher forward with ICL demo (no grad) -> student forward + reverse KL loss (grad) -> optimizer step -> EMA teacher update.
-5. LoRA adapter saved to `--adapter-path` (default `./adapters/local/adapters.safetensors`).
-
-### Adapter hot-swapping
-LoRA adapters can be loaded/unloaded at runtime via `/adapters/{name}/load` and `/adapters/{name}/unload`, using vLLM's dynamic LoRA API. The `adapter_manager` tracks metadata and manages the vLLM process lifecycle.
+5. LoRA adapter saved to `--adapter-path` (default `./adapters/local/adapters.safetensors`) alongside `adapter_config.json`.
+6. Step-0 KL diagnostic: warns if KL < 0.01 (enrichment too weak or `ema_alpha` too low).
+7. The trained adapter can be loaded at inference via `run --adapter-path ./adapters/local --backend mlx`.
 
 ---
 
@@ -204,11 +200,10 @@ The previous fallback regex matched action keywords (TYPE, CLICK) anywhere in te
 
 - **Playwright:** Reliable automation, clear actions, good for logging and replay. Stealth settings prevent CAPTCHA triggers.
 - **Multimodal (DOM + page text + screenshot):** DOM gives element IDs; page text gives readable content; screenshot gives layout and visual affordances.
-- **Backends:** Transformers for flexibility; TensorRT for throughput on NVIDIA; MLX for Apple Silicon; NIM for NVIDIA cloud; Remote vLLM for self-hosted GPU servers.
-- **Remote vLLM split:** Browser automation stays on the consumer machine (Mac); GPU inference and training happen on a dedicated GPU box. The same repo runs on both sides.
+- **Backends:** Transformers for flexibility; TensorRT for throughput on NVIDIA; MLX for Apple Silicon; NIM for NVIDIA cloud.
+- **Local inference, remote training:** All inference runs locally (Mac or workstation). The remote GPU server is used only for LoRA adapter training, keeping the architecture simple and the same repo runs on both sides.
 - **Frozen backbone + PEFT LoRA adapter:** Keeps behavior stable and limits memory. Only LoRA parameters (~10-50MB) are trained and swapped.
 - **EMA teacher + gating:** Enables deployment-time self-distillation. Teacher state is cloned LoRA weights only (not full model), enabling SDFT on single-GPU setups.
-- **vLLM pause-for-training:** On single-GPU boxes, vLLM is stopped to free VRAM during training, then restarted with the new adapter. No multi-GPU required.
 
 ---
 

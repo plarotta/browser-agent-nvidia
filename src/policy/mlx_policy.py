@@ -1,6 +1,13 @@
+import json
+import os
+import logging
+
+import mlx.core as mx
 from mlx_vlm import load, generate, apply_chat_template
 from mlx_vlm.utils import load_config
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 # Prompt char budget.  The system prompt is now compact (format instructions first,
 # DOM/history last) so 3000 chars gives plenty of room while staying safe for
@@ -9,8 +16,9 @@ MLX_MAX_PROMPT_CHARS = 3000
 
 
 class MLXPolicy:
-    def __init__(self, model_id: str = "mlx-community/gemma-3-12b-it-qat-4bit"):
+    def __init__(self, model_id: str = "mlx-community/gemma-3-12b-it-qat-4bit", adapter_path: str = None):
         self.model_id = model_id
+        self.adapter_path = adapter_path
         self.model = None
         self.processor = None
         self.config = None
@@ -19,7 +27,47 @@ class MLXPolicy:
         print(f"Loading MLX model: {self.model_id}...")
         self.model, self.processor = load(self.model_id, trust_remote_code=True)
         self.config = load_config(self.model_id)
+
+        if self.adapter_path and os.path.isdir(self.adapter_path):
+            self._load_adapter()
+
         print("MLX Model loaded.")
+
+    def _load_adapter(self):
+        """Apply LoRA structure and load saved adapter weights."""
+        from mlx_vlm.trainer.utils import get_peft_model, find_all_linear_names
+
+        # Read adapter config if available
+        config_path = os.path.join(self.adapter_path, "adapter_config.json")
+        rank = 16
+        alpha = 32.0
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                adapter_cfg = json.load(f)
+            rank = adapter_cfg.get("lora_rank", 16)
+            alpha = float(adapter_cfg.get("lora_alpha", rank * 2))
+            logger.info(f"Adapter config: rank={rank}, alpha={alpha}")
+
+        # Apply LoRA structure
+        linear_names = find_all_linear_names(self.model)
+        self.model = get_peft_model(
+            self.model,
+            linear_names,
+            rank=rank,
+            alpha=alpha,
+            dropout=0.0,
+            freeze=True,
+        )
+
+        # Load saved weights
+        adapter_file = os.path.join(self.adapter_path, "adapters.safetensors")
+        if os.path.exists(adapter_file):
+            weights = mx.load(adapter_file)
+            self.model.load_weights(list(weights.items()), strict=False)
+            mx.eval(self.model.parameters())
+            logger.info(f"Loaded adapter weights from {adapter_file}")
+        else:
+            logger.warning(f"No adapters.safetensors found in {self.adapter_path}")
 
     def _get_model_type(self) -> str:
         if isinstance(self.config, dict):

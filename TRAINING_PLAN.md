@@ -75,35 +75,11 @@ uv run python -m src.main train \
 
 ### Step 5: Check the training output
 
-Adapter saves to `./adapters/local/adapters.safetensors`. Logs show per-step KL loss — should decrease over the 2 epochs.
+Adapter saves to `./adapters/local/adapters.safetensors` alongside `adapter_config.json` (stores rank, alpha, model_id). Logs show per-step KL loss — should decrease over the 2 epochs. A step-0 KL diagnostic warns if the initial KL is near zero (enrichment too weak or `ema_alpha` too low).
 
 ### Step 6: Test the trained adapter
 
-The `run` command doesn't currently support `--adapter-path`, but `mlx_vlm.load()` accepts one natively. Two ways to test:
-
-#### Quick smoke test (Python one-liner)
-
-Verify the adapter loads without errors and produces output:
-
-```bash
-uv run python -c "
-from mlx_vlm import load, apply_chat_template, generate
-from mlx_vlm.utils import load_config
-from PIL import Image
-
-model_id = 'mlx-community/gemma-3-12b-it-qat-4bit'
-adapter_path = './adapters/local'
-
-model, processor = load(model_id, adapter_path=adapter_path)
-config = load_config(model_id)
-
-image = Image.open('logs/test_nim_run/traj_1770685362_step_0.png').convert('RGB')
-prompt = 'What action should I take on this webpage?'
-formatted = apply_chat_template(processor, config, prompt, num_images=1)
-output = generate(model, processor, formatted, image=[image], max_tokens=128, verbose=False)
-print(output)
-"
-```
+The `run` command supports `--adapter-path` to load a trained LoRA adapter at inference.
 
 #### Side-by-side comparison (base vs. adapted)
 
@@ -119,7 +95,7 @@ uv run python -m src.main run \
   --no-headless \
   --max-steps 10
 
-# Adapted (requires adding --adapter-path to the run command, see note below)
+# Adapted
 uv run python -m src.main run \
   --task eval_adapted \
   --goal "Search Google for 'NVIDIA Nemotron' and click the first result" \
@@ -130,16 +106,42 @@ uv run python -m src.main run \
   --adapter-path ./adapters/local
 ```
 
-> **Note:** The `run` command doesn't have `--adapter-path` yet. To enable this,
-> add the flag to `src/main.py` and pass it through to `MLXPolicy`, which would
-> call `load(model_id, adapter_path=adapter_path)` instead of `load(model_id)`.
-> This is a small follow-up change (~10 lines across `main.py` and `mlx_policy.py`).
-
 #### What to look for
 
 - **Adapter loads cleanly** — no shape mismatches or missing keys
 - **Output is valid action JSON** — not garbled text or prompt echoing
 - **Qualitative improvement** — the adapted model should be more decisive and make fewer hallucinated actions compared to baseline
+
+---
+
+---
+
+## Option C: Remote Training via `deploy` Command
+
+If you have a RunPod GPU server running, use the `deploy` command for the full round-trip:
+
+```bash
+# 1. Record a demo
+uv run python -m src.main record --url "https://google.com" --task my_search --goal "Search for hello world"
+
+# 2. Deploy (uploads trajectory, trains on server, downloads adapter)
+uv run python -m src.main deploy \
+  --task my_search \
+  --server-url http://<runpod-ip>:8080 \
+  --adapter-name my_search \
+  --ema-alpha 0.1
+
+# 3. Run with the downloaded adapter
+uv run python -m src.main run \
+  --task my_search \
+  --goal "Search for hello world" \
+  --backend mlx \
+  --adapter-path ./adapters/my_search \
+  --url "https://google.com" \
+  --no-headless
+```
+
+Check the server logs for the step-0 KL diagnostic — if KL < 0.01, try increasing `--ema-alpha` (e.g. 0.2-0.3).
 
 ---
 

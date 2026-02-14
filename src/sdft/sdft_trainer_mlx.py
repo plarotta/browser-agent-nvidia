@@ -9,22 +9,20 @@ Implements Algorithm 1 from arXiv:2601.19897:
 
 import json
 import os
-import io
-import base64
 import logging
 from typing import List, Dict, Any
 
-import requests
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx.utils import tree_flatten
 from PIL import Image
 
+from src.sdft.enrichment import enrich_demonstration, build_teacher_prompt
+
 logger = logging.getLogger(__name__)
 
 MLX_MAX_PROMPT_CHARS = 3000
-NIM_ENRICHMENT_OBS_CHARS = 1500
 
 
 class TrajectoryDataset:
@@ -42,7 +40,7 @@ class TrajectoryDataset:
             json_files = sorted(
                 f
                 for f in os.listdir(traj_dir)
-                if f.endswith(".json") and f.startswith("traj_")
+                if f.endswith(".json") and f.startswith("traj_") and "_meta" not in f
             )
             for jf in json_files:
                 with open(os.path.join(traj_dir, jf), "r") as f:
@@ -75,93 +73,6 @@ class TrajectoryDataset:
         return image, s["prompt"], s["target"]
 
 
-def enrich_demonstration(
-    image: Image.Image,
-    observation: str,
-    expert_action: str,
-    api_key: str,
-    api_url: str = "https://integrate.api.nvidia.com/v1/chat/completions",
-    model_id: str = "nvidia/nemotron-nano-12b-v2-vl",
-) -> str:
-    """Call NIM VLM to produce a rich ICL demonstration with reasoning.
-
-    On failure, returns the raw expert_action as fallback.
-    """
-    # Encode screenshot as base64 PNG
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    b64_image = base64.b64encode(buf.getvalue()).decode("utf-8")
-
-    truncated_obs = observation[:NIM_ENRICHMENT_OBS_CHARS]
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "/no_think You are an expert browser agent tutor. Given a webpage "
-                "screenshot, the DOM observation, and an expert's chosen action, "
-                "produce a concise explanation of WHY this action is correct. Include:\n"
-                "1. What the page currently shows (key visual/text context)\n"
-                "2. Which element the action targets and why it's the right choice\n"
-                "3. What the expected outcome of this action is\n\n"
-                "Keep it to 3-5 sentences. End with the action JSON."
-            ),
-        },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{b64_image}",
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        f"DOM observation:\n{truncated_obs}\n\n"
-                        f"Expert action taken:\n{expert_action}\n\n"
-                        "Explain why this action is correct:"
-                    ),
-                },
-            ],
-        },
-    ]
-
-    payload = {
-        "model": model_id,
-        "messages": messages,
-        "max_tokens": 512,
-        "temperature": 0.0,
-        "stream": False,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        resp = requests.post(api_url, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        enriched = resp.json()["choices"][0]["message"]["content"]
-        logger.debug("NIM enriched demonstration (%d chars)", len(enriched))
-        return enriched
-    except Exception as e:
-        logger.warning("NIM enrichment failed (%s), falling back to raw action", e)
-        return expert_action
-
-
-def build_teacher_prompt(student_prompt: str, demonstration: str) -> str:
-    """Append ICL demonstration block to the student prompt."""
-    return (
-        f"{student_prompt}\n\n"
-        "DEMONSTRATION:\n"
-        f"{demonstration}\n\n"
-        "Now provide your own action in the same JSON format:"
-    )
-
-
 def compute_kl_loss(student_logits: mx.array, teacher_logits: mx.array) -> mx.array:
     """Reverse KL divergence: D_KL(student || teacher).
 
@@ -191,6 +102,8 @@ def run_sdft_training(
     ema_alpha: float = 0.02,
     max_gen_tokens: int = 256,
     enrich: bool = True,
+    wandb_project: str = None,
+    wandb_run_name: str = None,
 ) -> Dict[str, Any]:
     """Run SDFT training on Apple Silicon using MLX.
 
@@ -200,6 +113,31 @@ def run_sdft_training(
     from mlx_vlm.utils import load_config
     from mlx_vlm.trainer.utils import get_peft_model, find_all_linear_names
     from mlx_vlm.trainer.trainer import save_adapter
+
+    # ── W&B setup ──
+    wb_run = None
+    if wandb_project:
+        try:
+            import wandb
+            wb_run = wandb.init(
+                project=wandb_project,
+                name=wandb_run_name,
+                config={
+                    "model_id": model_id,
+                    "num_epochs": num_epochs,
+                    "learning_rate": learning_rate,
+                    "lora_rank": lora_rank,
+                    "ema_alpha": ema_alpha,
+                    "max_gen_tokens": max_gen_tokens,
+                    "enrich": enrich,
+                    "backend": "mlx",
+                },
+            )
+            logger.info(f"W&B run started: {wb_run.url}")
+        except ImportError:
+            logger.warning("wandb not installed — skipping W&B logging (uv pip install wandb)")
+        except Exception as e:
+            logger.warning(f"wandb init failed: {e} — continuing without W&B")
 
     # ── Load model ──
     logger.info(f"Loading model: {model_id}")
@@ -239,6 +177,9 @@ def run_sdft_training(
             "(set the env var or use --no-enrich to suppress this warning)"
         )
 
+    # Enrichment cache dir alongside adapter save path
+    cache_dir = os.path.join(os.path.dirname(adapter_save_path), ".enrichment_cache") if enrich else None
+
     # ── Image token index (model-specific) ──
     image_token_index = None
     if hasattr(model, "config"):
@@ -275,6 +216,7 @@ def run_sdft_training(
                 demonstration = enrich_demonstration(
                     image, student_prompt_raw, expert_action,
                     api_key=nim_api_key,
+                    cache_dir=cache_dir,
                 )
             else:
                 demonstration = expert_action
@@ -329,7 +271,7 @@ def run_sdft_training(
             mx.eval(model.parameters())
             student_weights = tree_flatten(model.trainable_parameters())
 
-            model.load_weights(list(teacher_weights.items()))
+            model.load_weights(list(teacher_weights.items()), strict=False)
             mx.eval(model.parameters())
 
             t_ids = mx.concatenate(
@@ -349,7 +291,7 @@ def run_sdft_training(
             mx.eval(teacher_rollout_logits)
 
             # Restore student LoRA weights
-            model.load_weights(student_weights)
+            model.load_weights(student_weights, strict=False)
             mx.eval(model.parameters())
 
             # ── STEP 4: Student forward + KL loss (with grad) ──
@@ -389,6 +331,19 @@ def run_sdft_training(
             loss_val = loss.item()
             total_loss += loss_val
 
+            # ── Step-0 KL diagnostic ──
+            if total_steps == 1:
+                if loss_val < 0.01:
+                    logger.warning(
+                        f"DIAGNOSTIC: Step-0 KL = {loss_val:.6f} (near zero). "
+                        "Enrichment may be too weak or ema_alpha too low. "
+                        "Consider increasing ema_alpha or improving enrichment prompt."
+                    )
+                else:
+                    logger.info(
+                        f"DIAGNOSTIC: Step-0 KL = {loss_val:.6f} — signal looks healthy."
+                    )
+
             logger.info(
                 f"[E{epoch + 1} S{total_steps}] "
                 f"Sample {idx + 1}/{len(dataset)}, "
@@ -396,11 +351,34 @@ def run_sdft_training(
                 f"Rollout: {num_rollout} tok"
             )
 
+            if wb_run:
+                wb_run.log({
+                    "kl_loss": loss_val,
+                    "avg_loss": total_loss / total_steps,
+                    "rollout_tokens": num_rollout,
+                    "epoch": epoch + 1,
+                    "step": total_steps,
+                })
+
     # ── Save adapter ──
     os.makedirs(adapter_save_path, exist_ok=True)
     adapter_file = os.path.join(adapter_save_path, "adapters.safetensors")
     save_adapter(model, adapter_file)
+
+    # Save adapter config for later loading
+    config_path = os.path.join(adapter_save_path, "adapter_config.json")
+    with open(config_path, "w") as f:
+        json.dump({
+            "lora_rank": lora_rank,
+            "lora_alpha": lora_rank * 2,
+            "model_id": model_id,
+        }, f, indent=2)
+
     logger.info(f"Adapter saved to {adapter_save_path}")
+
+    if wb_run:
+        wb_run.log({"final_avg_loss": total_loss / max(total_steps, 1)})
+        wb_run.finish()
 
     return {
         "status": "completed",

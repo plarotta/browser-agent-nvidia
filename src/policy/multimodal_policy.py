@@ -15,23 +15,20 @@ try:
 except ImportError:
     NIMPolicy = None
 
-try:
-    from src.policy.remote_vllm_policy import RemoteVLLMPolicy
-except ImportError:
-    RemoteVLLMPolicy = None
-
 class MultimodalPolicy(nn.Module):
-    def __init__(self, 
-                 model_id: str = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", 
-                 device: str = "cuda", 
+    def __init__(self,
+                 model_id: str = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
+                 device: str = "cuda",
                  backend: str = "transformers",
-                 engine_dir: Optional[str] = None):
+                 engine_dir: Optional[str] = None,
+                 adapter_path: Optional[str] = None):
         super().__init__()
         self.backend = backend
         self.device = device
         self.model_id = model_id
         self.engine_dir = engine_dir
-        
+        self.adapter_path = adapter_path
+
         if backend == "tensorrt":
             if not engine_dir:
                 # Default engine dir if not specified
@@ -42,19 +39,12 @@ class MultimodalPolicy(nn.Module):
             print("Initializing MLXPolicy")
             if MLXPolicy is None:
                 raise ImportError("MLXPolicy could not be imported. Ensure mlx and mlx-vlm are installed.")
-            # Default to Qwen2-VL-2B-4bit if using default Nemotron (which MLX might not support well yet or we prefer Qwen)
-            # or just let the user specify. Ideally we swap the default for them in main.py.
-            self.impl = MLXPolicy(model_id)
+            self.impl = MLXPolicy(model_id, adapter_path=adapter_path)
         elif backend == "nim":
             print("Initializing NIMPolicy")
             if NIMPolicy is None:
                 raise ImportError("NIMPolicy could not be imported. Ensure requests is installed.")
             self.impl = NIMPolicy(model_id)
-        elif backend == "remote_vllm":
-            print("Initializing RemoteVLLMPolicy")
-            if RemoteVLLMPolicy is None:
-                raise ImportError("RemoteVLLMPolicy could not be imported.")
-            self.impl = RemoteVLLMPolicy(model_id)
         else:
             print("Initializing TransformersPolicy")
             self.impl = TransformersPolicy(model_id, device)

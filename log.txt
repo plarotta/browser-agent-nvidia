@@ -1,0 +1,10 @@
+INFO:cli:SDFT Training: task=search_weather, model=mlx-community/gemma-3-12b-it-qat-4bit
+INFO:cli:Trajectory dir: logs/search_weather, Adapter path: ./adapters/local
+INFO:src.sdft.sdft_trainer_mlx:Loading model: mlx-community/gemma-3-12b-it-qat-4bit
+Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files: 100%|██████████| 13/13 [00:00<00:00, 25780.59it/s]
+Using a slow image processor as `use_fast` is unset and a slow processor was saved with this model. `use_fast=True` will be the default behavior in v4.52, even if the model was saved with a slow processor. This will result in minor differences in outputs. You'll still be able to use a slow processor with `use_fast=False`.
+Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files: 100%|██████████| 13/13 [00:00<00:00, 39655.24it/s]
+INFO:src.sdft.sdft_trainer_mlx:Applying LoRA (rank=16) to 7 layers
+INFO:src.sdft.sdft_trainer_mlx:TrajectoryDataset: 8 positive samples
+INFO:src.sdft.sdft_trainer_mlx:=== Epoch 1/2 (8 samples) ===
+mx.metal.device_info is deprecated and will be removed in a future version. Use mx.device_info instead.

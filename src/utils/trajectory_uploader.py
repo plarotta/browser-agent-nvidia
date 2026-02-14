@@ -40,3 +40,33 @@ class TrajectoryUploader:
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    def download_adapter(self, adapter_name: str, local_path: str) -> str:
+        """Download adapter from server and extract to local_path.
+
+        Returns the local_path where the adapter was extracted.
+        """
+        resp = requests.get(
+            f"{self.server_url}/adapters/{adapter_name}/download",
+            stream=True,
+            timeout=300,
+        )
+        resp.raise_for_status()
+
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            with open(tmp_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    f.write(chunk)
+
+            os.makedirs(local_path, exist_ok=True)
+            with tarfile.open(tmp_path, "r:gz") as tar:
+                tar.extractall(path=local_path, filter="data")
+
+            logger.info(f"Adapter downloaded to {local_path}")
+            return local_path
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)

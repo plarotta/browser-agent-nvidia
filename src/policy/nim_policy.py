@@ -6,7 +6,7 @@ from PIL import Image
 
 
 class NIMPolicy:
-    def __init__(self, model_id: str = "nvidia/nemotron-nano-12b-v2-vl"):
+    def __init__(self, model_id: str = "nvidia/llama-4-maverick-17b-128e-instruct"):
         self.model_id = model_id
         self.api_key = os.environ.get("NVIDIA_API_KEY")
         self.api_url = "https://integrate.api.nvidia.com/v1/chat/completions"

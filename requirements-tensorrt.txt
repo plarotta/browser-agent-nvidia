@@ -1,7 +1,0 @@
-# Requirements for TensorRT-LLM support (Linux/NVIDIA GPU only)
-# Install via: pip install -r requirements-tensorrt.txt --extra-index-url https://pypi.nvidia.com
-
-tensorrt_llm>=0.10.0
-torch>=2.2.0
-transformers>=4.40.0
-accelerate
