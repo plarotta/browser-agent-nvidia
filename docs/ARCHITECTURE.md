@@ -131,7 +131,7 @@ All inference runs locally on the Mac (MLX, Transformers, TensorRT, or NIM). The
 | **Shared schemas** | `src/shared/schemas.py` | Done | Pydantic models for client-server communication |
 | **Adapter layer** | `src/policy/adapter_layer.py` | Present | Not yet wired as learnable head in run path |
 | **SDFT module** | `src/sdft/sdft_module.py` | Done | EMA teacher, KL loss, confidence/success gating; no actual gradient step yet |
-| **Enrichment module** | `src/sdft/enrichment.py` | Done | Shared NIM VLM enrichment (used by both MLX and server trainers). SHA-256 caching to `.enrichment_cache/` avoids redundant API calls |
+| **Enrichment module** | `src/sdft/enrichment.py` | Done | Nemotron Ultra 253B enrichment (text-only, DOM + action). SHA-256 caching to `.enrichment_cache/`. Used by both MLX and server trainers |
 | **MLX SDFT trainer** | `src/sdft/sdft_trainer_mlx.py` | Done | Full SDFT training loop on Apple Silicon: on-policy rollout, teacher/student KL loss, EMA update, LoRA adapter save. NIM-enriched teacher demos with caching. Step-0 KL diagnostics. Saves `adapter_config.json` |
 | **Checkpoint manager** | `src/safety/checkpoint_manager.py` | Done | Save/load/rollback; not yet invoked from runtime |
 | **Evaluation** | `src/evaluation/` | Unused | GoalSpec, GoalInterpreter, SuccessChecker exist but are not used in runtime; available for offline eval |
@@ -149,7 +149,7 @@ All inference runs locally on the Mac (MLX, Transformers, TensorRT, or NIM). The
 2. Client POSTs `/train` with trajectory IDs and hyperparameters (`ema_alpha`, `enrich`, etc.).
 3. `trainer_worker.run_training()` loads the base model + PEFT LoRA, runs true on-policy SDFT:
    - On-policy rollout from student (`model.generate(do_sample=True, temperature=1.0)`)
-   - Optional NIM enrichment of expert demonstrations (via `src/sdft/enrichment.py`, with caching)
+   - Optional Nemotron Ultra 253B enrichment of expert demonstrations (via `src/sdft/enrichment.py`, text-only, with caching)
    - Swap to EMA teacher weights, forward with ICL-enriched prompt on rollout tokens
    - Reverse KL: `D_KL(student || teacher)` — no SFT term
    - EMA teacher update with configurable `ema_alpha`
@@ -169,7 +169,7 @@ For Apple Silicon users, SDFT training runs locally without a server:
 
 1. Agent collects a trajectory during `run` (JSON + screenshots saved to `logs/{task}_run/`).
 2. `train` command loads positive-reward steps from the trajectory.
-3. **(Optional) NIM enrichment:** If `--enrich` and `NVIDIA_API_KEY` is set, each sample's screenshot + DOM + expert action is sent to the NIM VLM API. The NIM model returns a rich explanation (page context, element rationale, expected outcome) that replaces the raw action JSON as the teacher's ICL demonstration. Falls back to raw actions on failure.
+3. **(Optional) Nemotron Ultra enrichment:** If `--enrich` and `NVIDIA_API_KEY` is set, each sample's DOM observation and expert action are sent to Nemotron Ultra 253B via the NIM API. The model returns a rich explanation (page context, element rationale, expected outcome) that replaces the raw action JSON as the teacher's ICL demonstration. Falls back to raw actions on failure.
 4. For each sample: student rollout (no grad) -> teacher forward with ICL demo (no grad) -> student forward + reverse KL loss (grad) -> optimizer step -> EMA teacher update.
 5. LoRA adapter saved to `--adapter-path` (default `./adapters/local/adapters.safetensors`) alongside `adapter_config.json`.
 6. Step-0 KL diagnostic: warns if KL < 0.01 (enrichment too weak or `ema_alpha` too low).

@@ -194,7 +194,7 @@ def run_training(
             # ── Enrichment ──
             if enrich and nim_api_key:
                 demonstration = enrich_demonstration(
-                    image, student_prompt, expert_action,
+                    student_prompt, expert_action,
                     api_key=nim_api_key,
                     cache_dir=cache_dir,
                 )

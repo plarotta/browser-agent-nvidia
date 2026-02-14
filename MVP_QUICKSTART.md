@@ -8,7 +8,7 @@ Mac M4 (24GB)                         RunPod GPU
 Browser (Playwright)                  Training server (FastAPI)
 Demo recording                        Receives trajectory uploads
 Local inference (MLX + LoRA)          Runs SDFT LoRA training
-                                      NIM enrichment (90B API)
+                                      Nemotron Ultra 253B enrichment
       ──── upload trajectory ────>
       <──── download adapter ─────
 ```
@@ -46,7 +46,7 @@ git clone <repo-url> && cd browser-agent-nvidia
 uv sync
 uv pip install -e ".[server]"
 
-# NIM enrichment (calls 90B model on build.nvidia.com during training)
+# NIM enrichment (calls Nemotron Ultra 253B on build.nvidia.com during training)
 export NVIDIA_API_KEY="nvapi-..."
 
 # (Optional) W&B
@@ -153,7 +153,7 @@ uv run python -m src.main run \
 | Flag | Where | Purpose |
 |------|-------|---------|
 | `--ema-alpha` | train, deploy | EMA teacher update rate. Try 0.1-0.3 for few-shot (default 0.02 is very slow). |
-| `--enrich/--no-enrich` | train, deploy | Use NIM 90B to enrich teacher demos. Needs `NVIDIA_API_KEY`. |
+| `--enrich/--no-enrich` | train, deploy | Use Nemotron Ultra 253B to enrich teacher demos. Needs `NVIDIA_API_KEY`. |
 | `--wandb-project` | train, deploy | Enables W&B logging. Install with `uv pip install wandb`. |
 | `--adapter-path` | run | Load a trained LoRA adapter for local inference (MLX). |
 | `--epochs` | train, deploy | Training epochs (default 2). |

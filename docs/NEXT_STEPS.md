@@ -19,10 +19,10 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 - **Trajectory upload:** Client packages log_dir as tar.gz, uploads to server. Server stores and uses for training.
 - **NIM backend:** NVIDIA cloud API inference via NIMPolicy.
 - **MLX SDFT trainer:** Full SDFT training loop on Apple Silicon (`sdft_trainer_mlx.py`): on-policy rollout, teacher/student KL loss, EMA teacher update, LoRA adapter save via `train` CLI command.
-- **NIM-enriched teacher demonstrations:** Optional `--enrich` flag calls NIM VLM API to generate rich ICL demonstrations (page context, element rationale, expected outcome) for the teacher. Graceful fallback to raw action JSON when API is unavailable.
+- **Nemotron Ultra-enriched teacher demonstrations:** Optional `--enrich` flag calls Nemotron Ultra 253B (text-only) via NIM API to generate rich ICL demonstrations (page context, element rationale, expected outcome) for the teacher. Graceful fallback to raw action JSON when API is unavailable.
 - **True on-policy SDFT on server:** Rewrote `trainer_worker.py` from SFT+KL hybrid to true on-policy SDFT (on-policy rollout, reverse KL only, configurable EMA alpha, NIM enrichment integration).
-- **Shared enrichment module with caching:** Factored `enrich_demonstration()` and `build_teacher_prompt()` into `src/sdft/enrichment.py`. SHA-256 caching to `.enrichment_cache/` avoids redundant NIM API calls. Both MLX and server trainers use the shared module.
-- **Enrichment model upgraded:** Default NIM enrichment model changed from Nemotron-Nano-12B to `meta/llama-3.2-90b-vision-instruct` for higher-quality reasoning.
+- **Shared enrichment module with caching:** Factored `enrich_demonstration()` and `build_teacher_prompt()` into `src/sdft/enrichment.py`. SHA-256 caching to `.enrichment_cache/` avoids redundant API calls. Both MLX and server trainers use the shared module.
+- **Enrichment model upgraded:** Default enrichment model is now Nemotron Ultra 253B (`nvidia/llama-3.1-nemotron-ultra-253b-v1`), text-only — DOM observation + expert action provide sufficient context without screenshots.
 - **Adapter download endpoint:** `GET /adapters/{name}/download` returns trained adapter as tar.gz. `TrajectoryUploader.download_adapter()` on the client side.
 - **MLX adapter loading at inference:** `--adapter-path` flag on `run` command loads LoRA adapter into MLXPolicy. Reads `adapter_config.json` for rank/alpha.
 - **Deploy command:** New `deploy` CLI command orchestrates full remote round-trip: upload trajectory → trigger training → poll status → download adapter → print run command.

@@ -14,7 +14,7 @@ For system design and architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 - **Compact, truncation-safe prompt**: Output format instructions come first so the model always sees them, even when DOM is long.
 - **Programmatic guards**: Prevents common small-model mistakes (e.g. skipping submit after typing).
 - **Deployment-time adaptation**: SDFT with PEFT LoRA adapters, trainable on uploaded trajectories via the server or locally on Apple Silicon via MLX.
-- **NIM-enriched teacher demos**: Optionally calls the NIM VLM API during training to generate rich explanations of expert actions, improving teacher logit quality.
+- **Nemotron Ultra-enriched teacher demos**: Optionally calls Nemotron Ultra 253B via the NIM API during training to generate rich reasoning about expert actions, improving teacher logit quality.
 - **Consumer hardware**: Targets NVIDIA RTX 3090/4090; MLX for Mac (tested on M4/24GB with 12B-4bit).
 
 ## Installation
@@ -107,7 +107,7 @@ NVIDIA_API_KEY=nvapi-... uv run python -m src.main train --task "demo" --enrich
 | `--ema-alpha` | EMA update rate for teacher | `0.02` |
 | `--enrich/--no-enrich` | Enrich teacher demos via NIM API | `--enrich` |
 
-When `--enrich` is enabled and `NVIDIA_API_KEY` is set, each training sample is sent to the NIM VLM (default: `meta/llama-3.2-90b-vision-instruct`) to generate a rich explanation of *why* the expert action is correct (page context, element rationale, expected outcome). This produces more informative teacher logits. If the API key is missing or a call fails, training falls back to raw action JSON seamlessly. Enrichment results are cached in `.enrichment_cache/` to avoid redundant API calls across runs.
+When `--enrich` is enabled and `NVIDIA_API_KEY` is set, each training sample's DOM observation and expert action are sent to **Nemotron Ultra 253B** (`nvidia/llama-3.1-nemotron-ultra-253b-v1`) to generate a rich explanation of *why* the expert action is correct (page context, element rationale, expected outcome). This produces more informative teacher logits. If the API key is missing or a call fails, training falls back to raw action JSON seamlessly. Enrichment results are cached in `.enrichment_cache/` to avoid redundant API calls across runs.
 
 See [TRAINING_PLAN.md](TRAINING_PLAN.md) for a step-by-step walkthrough.
 

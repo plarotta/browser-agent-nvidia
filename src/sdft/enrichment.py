@@ -1,18 +1,19 @@
 """Shared enrichment utilities for SDFT training.
 
-Provides NIM VLM enrichment of expert demonstrations and teacher prompt
+Provides NIM enrichment of expert demonstrations and teacher prompt
 construction, used by both the MLX trainer and the server (PyTorch) trainer.
+
+Uses Nemotron Ultra 253B (text-only) for high-quality reasoning about DOM
+observations and expert actions. No screenshot needed — the DOM text and
+visible page text provide sufficient context for enrichment.
 """
 
-import io
-import base64
 import hashlib
 import json
 import logging
 import os
 
 import requests
-from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -20,28 +21,21 @@ NIM_ENRICHMENT_OBS_CHARS = 1500
 
 
 def enrich_demonstration(
-    image: Image.Image,
     observation: str,
     expert_action: str,
     api_key: str,
     api_url: str = "https://integrate.api.nvidia.com/v1/chat/completions",
-    model_id: str = "meta/llama-3.2-90b-vision-instruct",
+    model_id: str = "nvidia/llama-3.1-nemotron-ultra-253b-v1",
     cache_dir: str | None = None,
 ) -> str:
-    """Call NIM VLM to produce a rich ICL demonstration with reasoning.
+    """Call Nemotron Ultra to produce a rich ICL demonstration with reasoning.
 
     If cache_dir is set, results are cached to avoid redundant API calls.
     On failure, returns the raw expert_action as fallback.
     """
-    # Encode screenshot as base64 PNG
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    screenshot_bytes = buf.getvalue()
-    b64_image = base64.b64encode(screenshot_bytes).decode("utf-8")
-
     # Check cache
     if cache_dir:
-        cache_key = _cache_key(screenshot_bytes, observation, expert_action)
+        cache_key = _cache_key(observation, expert_action)
         cached = _cache_read(cache_dir, cache_key)
         if cached is not None:
             logger.debug("Enrichment cache hit: %s", cache_key[:12])
@@ -53,10 +47,19 @@ def enrich_demonstration(
         {
             "role": "system",
             "content": (
-                "/no_think You are an expert browser agent tutor. Given a webpage "
-                "screenshot, the DOM observation, and an expert's chosen action, "
-                "produce a concise explanation of WHY this action is correct. Include:\n"
-                "1. What the page currently shows (key visual/text context)\n"
+                "You are an expert browser agent tutor. A browser agent controls a "
+                "web page using the following action space:\n\n"
+                "- CLICK (element_id required): Click an interactive element\n"
+                "- TYPE (element_id + value): Type text into an input field\n"
+                "- PRESS_ENTER: Press the Enter key (e.g. to submit a search)\n"
+                "- SCROLL (value: up/down): Scroll the page\n"
+                "- WAIT: Wait for the page to load\n"
+                "- NAVIGATE (value: URL): Navigate to a URL from the page\n"
+                "- FINISH (value: answer): Task is complete; value contains the result\n\n"
+                "Given the DOM observation (interactive elements and visible page text) "
+                "and an expert's chosen action, produce a concise explanation of WHY "
+                "this action is correct. Include:\n"
+                "1. What the page currently shows (key text context from the DOM)\n"
                 "2. Which element the action targets and why it's the right choice\n"
                 "3. What the expected outcome of this action is\n\n"
                 "Keep it to 3-5 sentences. End with the action JSON."
@@ -64,22 +67,11 @@ def enrich_demonstration(
         },
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{b64_image}",
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        f"DOM observation:\n{truncated_obs}\n\n"
-                        f"Expert action taken:\n{expert_action}\n\n"
-                        "Explain why this action is correct:"
-                    ),
-                },
-            ],
+            "content": (
+                f"DOM observation:\n{truncated_obs}\n\n"
+                f"Expert action taken:\n{expert_action}\n\n"
+                "Explain why this action is correct:"
+            ),
         },
     ]
 
@@ -87,7 +79,8 @@ def enrich_demonstration(
         "model": model_id,
         "messages": messages,
         "max_tokens": 512,
-        "temperature": 0.0,
+        "temperature": 0.6,
+        "top_p": 0.95,
         "stream": False,
     }
 
@@ -97,10 +90,10 @@ def enrich_demonstration(
     }
 
     try:
-        resp = requests.post(api_url, json=payload, headers=headers, timeout=30)
+        resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
         resp.raise_for_status()
         enriched = resp.json()["choices"][0]["message"]["content"]
-        logger.debug("NIM enriched demonstration (%d chars)", len(enriched))
+        logger.debug("Nemotron Ultra enriched demonstration (%d chars)", len(enriched))
 
         if cache_dir:
             _cache_write(cache_dir, cache_key, enriched)
@@ -123,9 +116,8 @@ def build_teacher_prompt(student_prompt: str, demonstration: str) -> str:
 
 # ── Caching helpers ──
 
-def _cache_key(screenshot_bytes: bytes, observation: str, expert_action: str) -> str:
+def _cache_key(observation: str, expert_action: str) -> str:
     h = hashlib.sha256()
-    h.update(screenshot_bytes)
     h.update(observation.encode("utf-8"))
     h.update(expert_action.encode("utf-8"))
     return h.hexdigest()
