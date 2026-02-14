@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 MAX_PROMPT_CHARS = 3000
 
 
+def _format_vlm_prompt(processor, text: str, has_image: bool = True) -> str:
+    """Format text through the processor's chat template with image tokens."""
+    content = []
+    if has_image:
+        content.append({"type": "image"})
+    content.append({"type": "text", "text": text})
+    messages = [{"role": "user", "content": content}]
+    return processor.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False,
+    )
+
+
 class TrajectoryDataset(Dataset):
     """Loads trajectory JSON + screenshots for training.
 
@@ -204,8 +216,9 @@ def run_training(
             teacher_prompt = build_teacher_prompt(student_prompt, demonstration)
 
             # ── STEP 1: On-policy rollout from student (no grad) ──
+            student_text = _format_vlm_prompt(processor, student_prompt)
             student_inputs = processor(
-                text=student_prompt,
+                text=student_text,
                 images=image,
                 return_tensors="pt",
             ).to(model.device)
@@ -234,8 +247,9 @@ def run_training(
                     student_state[name] = param.data.clone()
                     param.data.copy_(teacher_state[name])
 
+            teacher_text = _format_vlm_prompt(processor, teacher_prompt)
             teacher_inputs = processor(
-                text=teacher_prompt,
+                text=teacher_text,
                 images=image,
                 return_tensors="pt",
             ).to(model.device)
