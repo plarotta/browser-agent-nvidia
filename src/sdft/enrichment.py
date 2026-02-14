@@ -92,7 +92,12 @@ def enrich_demonstration(
     try:
         resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
         resp.raise_for_status()
-        enriched = resp.json()["choices"][0]["message"]["content"]
+        message = resp.json()["choices"][0]["message"]
+        # Nemotron Ultra may put reasoning in reasoning_content, with content as the final answer
+        enriched = message.get("content") or message.get("reasoning_content") or ""
+        if not enriched:
+            logger.warning("NIM enrichment returned empty response, falling back to raw action")
+            return expert_action
         logger.debug("Nemotron Ultra enriched demonstration (%d chars)", len(enriched))
 
         if cache_dir:
