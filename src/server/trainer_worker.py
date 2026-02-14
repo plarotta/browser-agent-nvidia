@@ -157,7 +157,7 @@ def run_training(
         logger.warning("No training samples found")
         return {"status": "failed", "message": "No positive samples in trajectories"}
 
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=lambda x: x[0])
 
     # NIM enrichment setup
     nim_api_key = os.environ.get("NVIDIA_API_KEY") if enrich else None
@@ -182,10 +182,10 @@ def run_training(
     for epoch in range(num_epochs):
         logger.info(f"=== Epoch {epoch + 1}/{num_epochs} ({len(dataset)} samples) ===")
 
-        for batch in dataloader:
-            image = batch["image"][0]  # batch_size=1
-            student_prompt = batch["prompt"][0]
-            expert_action = batch["target"][0]
+        for sample in dataloader:
+            image = sample["image"]
+            student_prompt = sample["prompt"]
+            expert_action = sample["target"]
 
             # Truncate prompt
             if len(student_prompt) > MAX_PROMPT_CHARS:
