@@ -38,7 +38,7 @@ def enrich_demonstration(
         cache_key = _cache_key(observation, expert_action)
         cached = _cache_read(cache_dir, cache_key)
         if cached is not None:
-            logger.debug("Enrichment cache hit: %s", cache_key[:12])
+            logger.info("NIM enrichment cache hit (%s): %s...", cache_key[:12], cached[:200].replace("\n", " "))
             return cached
 
     truncated_obs = observation[:NIM_ENRICHMENT_OBS_CHARS]
@@ -90,15 +90,19 @@ def enrich_demonstration(
     }
 
     try:
+        import time as _time
+        t0 = _time.monotonic()
         resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
+        elapsed = _time.monotonic() - t0
         resp.raise_for_status()
         message = resp.json()["choices"][0]["message"]
         # Nemotron Ultra may put reasoning in reasoning_content, with content as the final answer
         enriched = message.get("content") or message.get("reasoning_content") or ""
         if not enriched:
-            logger.warning("NIM enrichment returned empty response, falling back to raw action")
+            logger.warning("NIM enrichment returned empty response (%.1fs), falling back to raw action", elapsed)
             return expert_action
-        logger.debug("Nemotron Ultra enriched demonstration (%d chars)", len(enriched))
+        preview = enriched[:300].replace("\n", " ")
+        logger.info("NIM enrichment OK (%d chars, %.1fs): %s...", len(enriched), elapsed, preview)
 
         if cache_dir:
             _cache_write(cache_dir, cache_key, enriched)
