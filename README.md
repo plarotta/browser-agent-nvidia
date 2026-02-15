@@ -1,215 +1,231 @@
-# Self-Learning Browser Agent (Nemotron Edition)
+# Self-Learning Browser Agent
 
-A browser automation agent that uses a **Vision Language Model (VLM)** to observe web pages and take actions toward a natural-language goal. Optionally adapts at deployment time using **Self-Distillation Fine-Tuning (SDFT)**.
+A browser agent that learns from a single human demonstration. Show it how to do a task once, and it trains a LoRA adapter that makes it better at that task — all on consumer hardware.
 
-Powered by **NVIDIA Nemotron** (default: `Llama-3.1-Nemotron-Nano-VL-8B-V1`) on CUDA, or **Gemma-3-12B-QAT** on Apple Silicon via **MLX**. All inference runs locally — a remote GPU instance is used only for LoRA adapter training. Uses **Playwright** for browser control.
+## Why
 
-For system design and architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For a prioritized roadmap, see [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
+Most "agentic" browser use today is either fragile (API/MCP wrappers), expensive (cloud-hosted vision models), or both. And conventional fine-tuning on raw demonstrations is a dead end for small models — they either can't learn the behavior, or they forget their general knowledge in the process.
 
-## Features
+This project takes a different approach:
 
-- **Multimodal control**: DOM snapshots (interactive elements + visible page text) + screenshots for robust action selection.
-- **Multiple backends**: Transformers (CUDA/CPU), TensorRT, MLX (Apple Silicon), NIM (NVIDIA API).
-- **Remote training server**: Upload trajectories to a GPU box (e.g. RunPod), train LoRA adapters via SDFT, download and run locally.
-- **Compact, truncation-safe prompt**: Output format instructions come first so the model always sees them, even when DOM is long.
-- **Programmatic guards**: Prevents common small-model mistakes (e.g. skipping submit after typing).
-- **Deployment-time adaptation**: SDFT with PEFT LoRA adapters, trainable on uploaded trajectories via the server or locally on Apple Silicon via MLX.
-- **Nemotron Ultra-enriched teacher demos**: Optionally calls Nemotron Ultra 253B via the NIM API during training to generate rich reasoning about expert actions, improving teacher logit quality.
-- **Consumer hardware**: Targets NVIDIA RTX 3090/4090; MLX for Mac (tested on M4/24GB with 12B-4bit).
+- **Local-first.** All inference runs on your machine. No API calls per action, no cloud costs, no data leaving your laptop. A 12B quantized model on a Mac is free to run forever.
+- **Learn from one demo, not thousands.** Record a single demonstration of a task. A large teacher model (Nemotron Ultra 253B) enriches each step with reasoning about *why* the action is correct, then Self-Distillation Fine-Tuning (SDFT) transfers that understanding into a lightweight LoRA adapter. The small model doesn't learn from raw actions alone — it learns from a much stronger model's interpretation of those actions.
+- **Adapters, not fine-tunes.** [Self-Distillation Fine-Tuning (SDFT)](https://arxiv.org/abs/2601.19897) trains a LoRA adapter (~10-50MB), not a new model. The base model's general knowledge stays intact. You can stack adapters for different tasks or drop them entirely to get back to baseline.
+- **Lightweight models become useful.** This pipeline turns a 12B quantized model (Gemma 3) into a capable browser agent for specific tasks — something that would otherwise require a much larger model or expensive API access.
 
-## Installation
+## How It Works (overview)
 
-This project uses **uv** for dependency management.
+1. **Record** a demonstration on your Mac (Playwright opens a browser, you perform the task)
+2. **Deploy** the trajectory to a remote GPU, where it's enriched by **Nemotron Ultra 253B** and used for **SDFT**
+3. **Run** the agent locally with the trained adapter — inference stays on your Mac via MLX
+
+```text
+Mac (M-series, 24GB)                  Remote GPU (RunPod / Lambda)
+────────────────────                  ──────────────────────────────
+Browser (Playwright)                  Training server (FastAPI)
+Demo recording                        Receives trajectory uploads
+Local inference (MLX + LoRA)          SDFT with PEFT LoRA
+                                      Nemotron Ultra 253B enrichment
+      ──── upload trajectory ────>
+      <──── download adapter ─────
+```
+
+The pipeline is **backbone-agnostic** — the same workflow works whether the base model runs on NVIDIA GPUs (Transformers, TensorRT, NIM) or Apple Silicon (MLX). Training happens once on a GPU; the resulting adapter slots into any backend.
+
+## Quickstart
+
+### Prerequisites
+
+- **Mac** (M-series, 24GB+ RAM) — or any machine with a supported backend
+- **GPU instance** (RunPod, Lambda, etc. — 1x A100/H100/4090, 24GB+ VRAM) for training only
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on both machines
+- `NVIDIA_API_KEY` from [build.nvidia.com](https://build.nvidia.com) for NIM enrichment (optional but recommended)
+
+### 1. Mac Setup
 
 ```bash
-git clone https://github.com/your-repo/browser-agent-nvidia.git
-cd browser-agent-nvidia
-
+git clone <repo-url> && cd browser-agent-nvidia
 uv sync
-uv run playwright install
+uv run playwright install chromium
 ```
 
-**Server (GPU box only):** Install with server extras for FastAPI and PEFT:
+### 2. GPU Server Setup
+
+The GPU instance only runs the training control plane — no inference.
 
 ```bash
-pip install -e ".[server]"
-```
+git clone <repo-url> && cd browser-agent-nvidia
+uv sync
+uv pip install -e ".[server]"
 
-## Usage
+# Gemma 3 is gated — accept the license on HuggingFace, then login
+huggingface-cli login
 
-### Record a demonstration
+# NIM enrichment (calls Nemotron Ultra 253B during training)
+export NVIDIA_API_KEY="nvapi-..."
 
-Capture a trajectory (browser opens; press Enter to stop).
-
-```bash
-uv run python -m src.main record --url "https://example.com" --task "login_demo"
-```
-
-### Run the agent (inference)
-
-Execute the agent toward a natural-language goal. Requires `--task` and `--goal`.
-
-```bash
-uv run python -m src.main run --task "demo" --goal "Search for flights to NYC" --url "https://google.com" --no-headless
-```
-
-**Options:**
-
-| Option | Description | Default |
-| -------- | ------------- | --------- |
-| `--backend` | `transformers`, `tensorrt`, `mlx`, or `nim` | `transformers` |
-| `--engine-dir` | Path to TensorRT engine (for `tensorrt`) | -- |
-| `--model-id` | Override model (e.g. `mlx-community/gemma-3-12b-it-qat-4bit`) | backend-dependent |
-| `--url` | Starting URL | `https://google.com` |
-| `--max-steps` | Max agent steps | `15` |
-| `--adapter-path` | Path to LoRA adapter directory (for MLX) | -- |
-| `--train` | Enable online SDFT | off |
-
-**Examples:**
-
-```bash
-# MLX (Apple Silicon) — uses Gemma-3-12B-QAT by default
-uv run python -m src.main run --task "demo" --goal "Tell me the temperature in NYC" --backend mlx --no-headless
-
-# Override model
-uv run python -m src.main run --task "demo" --goal "Search for X" --backend mlx --model-id "mlx-community/some-other-model" --no-headless
-
-# With a trained LoRA adapter (MLX)
-uv run python -m src.main run --task "demo" --goal "Search for flights" --backend mlx --adapter-path ./adapters/my_adapter --no-headless
-
-# With online learning (SDFT)
-uv run python -m src.main run --task "demo" --goal "Complete the task" --train --no-headless
-```
-
-### Train an adapter (MLX, Apple Silicon)
-
-Run SDFT training on collected trajectories to produce a LoRA adapter.
-
-```bash
-# Basic (raw expert actions as teacher demos)
-uv run python -m src.main train --task "demo" --no-enrich
-
-# With NIM-enriched teacher demos (recommended, requires NVIDIA_API_KEY)
-NVIDIA_API_KEY=nvapi-... uv run python -m src.main train --task "demo" --enrich
-```
-
-**Options:**
-
-| Option | Description | Default |
-| -------- | ------------- | --------- |
-| `--task` | Task name (trajectory loaded from `logs/{task}_run`) | required |
-| `--trajectory-dir` | Override trajectory directory | `logs/{task}_run` |
-| `--model-id` | Model to fine-tune | `mlx-community/gemma-3-12b-it-qat-4bit` |
-| `--adapter-path` | Where to save LoRA adapter | `./adapters/local` |
-| `--epochs` | Training epochs | `2` |
-| `--lr` | Learning rate | `1e-5` |
-| `--lora-rank` | LoRA rank | `16` |
-| `--ema-alpha` | EMA update rate for teacher | `0.02` |
-| `--enrich/--no-enrich` | Enrich teacher demos via NIM API | `--enrich` |
-
-When `--enrich` is enabled and `NVIDIA_API_KEY` is set, each training sample's DOM observation and expert action are sent to **Nemotron Ultra 253B** (`nvidia/llama-3.1-nemotron-ultra-253b-v1`) to generate a rich explanation of *why* the expert action is correct (page context, element rationale, expected outcome). This produces more informative teacher logits. If the API key is missing or a call fails, training falls back to raw action JSON seamlessly. Enrichment results are cached in `.enrichment_cache/` to avoid redundant API calls across runs.
-
-See [TRAINING_PLAN.md](TRAINING_PLAN.md) for a step-by-step walkthrough.
-
-### Deploy: remote round-trip (record → train → download)
-
-The `deploy` command orchestrates the full remote training pipeline: upload a trajectory to the server, trigger SDFT training, poll until complete, and download the trained adapter locally.
-
-```bash
-# Record a demo first
-uv run python -m src.main record --url "https://google.com" --task my_task --goal "Search for hello world"
-
-# Deploy to remote GPU server
-uv run python -m src.main deploy \
-  --task my_task \
-  --server-url http://<runpod-ip>:8080 \
-  --adapter-name my_task \
-  --ema-alpha 0.1
-```
-
-**Options:**
-
-| Option | Description | Default |
-| -------- | ------------- | --------- |
-| `--task` | Task name (trajectory loaded from `logs/{task}`) | required |
-| `--trajectory-dir` | Override trajectory directory | `logs/{task}` |
-| `--server-url` | Remote server URL | required |
-| `--adapter-name` | Name for the adapter on the server | required |
-| `--adapter-path` | Local path to save downloaded adapter | `./adapters/{adapter_name}` |
-| `--ema-alpha` | EMA update rate for teacher (try 0.1-0.3 for few-shot) | `0.1` |
-| `--enrich/--no-enrich` | Enrich teacher demos via NIM API | `--enrich` |
-| `--epochs` | Training epochs | `2` |
-| `--lr` | Learning rate | `1e-4` |
-| `--lora-rank` | LoRA rank | `16` |
-| `--poll-interval` | Seconds between training status polls | `10` |
-
-After completion, the command prints the `run` invocation to use the downloaded adapter.
-
-### Start the training server (GPU box)
-
-On a GPU machine (e.g. RunPod), start the training control plane:
-
-```bash
-pip install -e ".[server]"
+# Start the training server (model loads in 4-bit via bitsandbytes)
 uv run python -m src.main serve \
-  --model-id nvidia/Nemotron-Nano-12B-v2-VL-BF16 \
-  --host 0.0.0.0 --port 8080
+  --model-id google/gemma-3-12b-it-qat-q4_0-unquantized \
+  --port 8080
 ```
 
-**Server endpoints:**
+### 3. Record a Demo (Mac)
+
+A browser opens. Perform the task yourself, then press Ctrl+C.
+
+```bash
+uv run python -m src.main record \
+  --url "https://google.com" \
+  --task google_search \
+  --goal "Search for 'NVIDIA Nemotron'"
+```
+
+Trajectory saves to `logs/google_search/` (screenshots + DOM + actions).
+
+### 4. Deploy: Train Remotely, Download Adapter (Mac)
+
+One command uploads the demo, trains an adapter on the GPU, and downloads the result.
+
+```bash
+uv run python -m src.main deploy \
+  --task google_search \
+  --server-url http://<GPU_IP>:8080 \
+  --adapter-name google_search \
+  --ema-alpha 0.1 \
+  --epochs 2
+```
+
+Takes a few minutes. The adapter downloads to `./adapters/google_search/`.
+
+### 5. Run with Adapter (Mac)
+
+All inference runs locally — no GPU needed.
+
+```bash
+uv run python -m src.main run \
+  --task google_search \
+  --goal "Search for 'NVIDIA Nemotron'" \
+  --backend mlx \
+  --adapter-path ./adapters/google_search \
+  --url "https://google.com" \
+  --no-headless
+```
+
+### 6. Verify: Base vs. Adapted
+
+Run the same task with and without the adapter to confirm improvement.
+
+```bash
+# Baseline (no adapter)
+uv run python -m src.main run \
+  --task eval_base \
+  --goal "Search for 'NVIDIA Nemotron'" \
+  --backend mlx --url "https://google.com" --no-headless
+
+# With adapter
+uv run python -m src.main run \
+  --task eval_adapted \
+  --goal "Search for 'NVIDIA Nemotron'" \
+  --backend mlx --adapter-path ./adapters/google_search \
+  --url "https://google.com" --no-headless
+```
+
+---
+
+## How It Works
+
+### Agent Loop (each step)
+
+1. **Observe** the page: extract interactive DOM elements (with stable IDs) and visible page text via `innerText`, plus a screenshot.
+2. **Build a prompt** with goal, output format, rules, action history, and DOM summary. Format instructions come first so small models always see them, even when DOM is long.
+3. **Generate** a JSON action via the VLM: TYPE, CLICK, PRESS_ENTER, SCROLL, WAIT, NAVIGATE, or FINISH.
+4. **Parse** the output: JSON extraction, line-anchored fallback regex, done-language detection.
+5. **Guard**: programmatic overrides for common small-model mistakes (e.g. FINISH without submitting a search → override to PRESS_ENTER).
+6. **Execute** via Playwright. PRESS_ENTER waits for page load. TYPE rejects empty values.
+7. **Terminate** when the model outputs FINISH (with the answer in `value`), or at `max_steps`.
+
+### Training (SDFT)
+
+This project adapts [Self-Distillation Fine-Tuning (SDFT)](https://arxiv.org/abs/2601.19897) for browser automation. The original method updates the model's full weights; we train LoRA adapters instead, keeping the base model frozen and the adapters small enough to swap per-task. The core training loop remains the same:
+
+1. **Enrichment** (optional): Each demo step's DOM observation and expert action are sent to **Nemotron Ultra 253B** via the NIM API. The large model generates a rich explanation of *why* the action is correct — page context, element rationale, expected outcome. This produces more informative teacher signals than raw action JSON. Results are cached in `.enrichment_cache/`.
+2. **On-policy rollout**: The student model generates its own continuation from the demo state (with sampling).
+3. **Teacher forward**: EMA teacher weights process the enriched demo with the rollout tokens.
+4. **Reverse KL loss**: `D_KL(student || teacher)` — no SFT term. The student learns to match the teacher's distribution.
+5. **EMA update**: Teacher weights are updated as a moving average of student weights.
+6. **Adapter save**: Only LoRA parameters (~10-50MB) are saved. PEFT adapters auto-remap to MLX format for cross-platform compatibility.
+
+---
+
+## CLI Reference
+
+| Command | Purpose |
+|---------|---------|
+| `record` | Record a human demonstration |
+| `run` | Run the agent toward a goal |
+| `train` | Train a LoRA adapter locally (MLX) |
+| `deploy` | Full remote round-trip: upload → train → poll → download |
+| `serve` | Start the training server on a GPU box |
+| `status` | Show agent status |
+
+### Key Options
+
+| Flag | Commands | Purpose |
+|------|----------|---------|
+| `--backend` | run | `transformers`, `tensorrt`, `mlx`, or `nim` (default: `transformers`) |
+| `--model-id` | run, train, serve | Override model ID |
+| `--adapter-path` | run, train | Load/save LoRA adapter (MLX) |
+| `--ema-alpha` | train, deploy | EMA teacher update rate. 0.1-0.3 for few-shot (default 0.02). |
+| `--enrich/--no-enrich` | train, deploy | Enrich teacher demos via Nemotron Ultra 253B. Needs `NVIDIA_API_KEY`. |
+| `--epochs` | train, deploy | Training epochs (default 2) |
+| `--lora-rank` | train, deploy | LoRA rank (default 16, use 8 if OOM) |
+| `--url` | record, run | Starting URL |
+| `--max-steps` | run | Max agent steps (default 15) |
+| `--no-headless` | run | Show the browser window |
+
+### Server Endpoints
 
 | Endpoint | Method | Purpose |
-| ---------- | -------- | --------- |
+|----------|--------|---------|
 | `/health` | GET | Health check + training status |
-| `/upload_trajectory` | POST | Upload trajectory tar.gz for training |
-| `/train` | POST | Trigger SDFT training with PEFT LoRA |
-| `/train/status` | GET | Check training job progress |
-| `/adapters` | GET | List available LoRA adapters |
+| `/upload_trajectory` | POST | Upload trajectory tar.gz |
+| `/train` | POST | Trigger SDFT training |
+| `/train/status` | GET | Check training progress |
+| `/adapters` | GET | List available adapters |
 | `/adapters/{name}/download` | GET | Download adapter as tar.gz |
 
-### Status
+---
 
-```bash
-uv run python -m src.main status
-```
-
-### Demo script
-
-```bash
-./run_demo.sh
-```
-
-## How it works
-
-Each step the agent:
-
-1. **Observes** the page: extracts interactive DOM elements (with stable `data-agent-id`s) and visible page text via `innerText`, plus a screenshot.
-2. **Builds a prompt** with goal, output format, rules, action history, and DOM summary. The prompt is structured so format instructions come first (truncation-safe for small models).
-3. **Generates** a JSON action via the VLM (TYPE, CLICK, PRESS_ENTER, SCROLL, WAIT, NAVIGATE, or FINISH).
-4. **Parses** the output: primary JSON parser, fallback regex parser (line-start anchored to avoid phantom matches), and done-language detection.
-5. **Applies guards**: e.g. if the model tries to FINISH without submitting a search, the runtime overrides to PRESS_ENTER.
-6. **Executes** the action via Playwright. PRESS_ENTER waits for page load. TYPE rejects empty values.
-7. **Terminates** when the model outputs FINISH (with the answer in `value`), or at `max_steps`.
-
-## Configuration
-
-Edit `src/utils/config.py` for defaults: `model_id`, `device`, `backend`, `engine_dir`, viewport, learning rate, EMA decay, update budget, and paths.
-
-## Project structure
+## Project Structure
 
 | Path | Purpose |
-| ------ | --------- |
+|------|---------|
 | `src/agent/` | Agent runtime (step loop, prompt, guards), action parser |
 | `src/browser_interaction/` | Playwright session manager, action executor |
 | `src/observation/` | DOM snapshotter (elements + page text), visual capture |
-| `src/policy/` | Multimodal policy dispatch, backend implementations (Transformers, TensorRT, MLX, NIM) |
-| `src/server/` | FastAPI training control plane (`api.py`), SDFT trainer worker |
-| `src/shared/` | Pydantic request/response schemas shared between client and server |
-| `src/sdft/` | Self-distillation: EMA teacher/gating (`sdft_module.py`), MLX SDFT trainer (`sdft_trainer_mlx.py`), shared enrichment module with caching (`enrichment.py`) |
+| `src/policy/` | Multimodal policy dispatch + backends (Transformers, TensorRT, MLX, NIM) |
+| `src/server/` | FastAPI training control plane, SDFT trainer worker |
+| `src/sdft/` | SDFT module (EMA teacher, KL loss), MLX SDFT trainer, enrichment with caching |
+| `src/shared/` | Pydantic schemas shared between client and server |
 | `src/safety/` | Checkpoint save/load/rollback |
-| `src/evaluation/` | Goal spec, success checker (not used in runtime; available for offline evaluation) |
-| `src/utils/` | Config, trajectory logger, trajectory uploader (upload + adapter download) |
-| `scripts/` | Server launch scripts (RunPod) |
+| `src/evaluation/` | Goal spec, success checker (offline eval) |
+| `src/utils/` | Config, trajectory logger, trajectory uploader |
+| `docs/` | Architecture deep-dive, roadmap |
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| "No training samples found" | Trajectory has no positive-reward steps. Re-record with successful actions. |
+| Step-0 KL near zero | Increase `--ema-alpha` (try 0.2-0.3) or check enrichment is working. |
+| OOM on Mac during training | Use `--lora-rank 8`. |
+| OOM on GPU server | Model loads in 4-bit automatically. If still OOM, use `--lora-rank 8`. |
+| HuggingFace 401 | Gemma 3 is gated. Run `huggingface-cli login` and accept the license. |
+| Server 404 on adapter download | Training may have failed. Check `GET <server>/train/status`. |
+| No enrichment during training | Ensure `NVIDIA_API_KEY` is exported on the server. |
 
 ## License
 

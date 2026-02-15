@@ -124,10 +124,10 @@ All inference runs locally on the Mac (MLX, Transformers, TensorRT, or NIM). The
 | **Multimodal policy** | `src/policy/multimodal_policy.py` | Done | Dispatches to Transformers / TensorRT / MLX / NIM |
 | **Transformers policy** | `src/policy/transformers_policy.py` | Done | Hugging Face VLM inference |
 | **TensorRT policy** | `src/policy/tensorrt_policy.py` | Done | TRT engine inference |
-| **MLX policy** | `src/policy/mlx_policy.py` | Done | Apple Silicon VLM; 3000-char prompt limit; BOS-strip fix for mllama; optional LoRA adapter loading via `--adapter-path` |
+| **MLX policy** | `src/policy/mlx_policy.py` | Done | Apple Silicon VLM; 3000-char prompt limit; BOS-strip fix for mllama; optional LoRA adapter loading via `--adapter-path`; auto-remaps PEFT (PyTorch) adapter keys + transposes weights for cross-platform compatibility |
 | **NIM policy** | `src/policy/nim_policy.py` | Done | NVIDIA NIM cloud API inference |
 | **FastAPI server** | `src/server/api.py` | Done | Training control plane: `/train`, `/upload_trajectory`, `/adapters/*` (incl. download), `/health` |
-| **Trainer worker** | `src/server/trainer_worker.py` | Done | True on-policy SDFT with PEFT LoRA: on-policy rollout, reverse KL (no SFT term), EMA teacher via weight swap, NIM enrichment, step-0 KL diagnostics |
+| **Trainer worker** | `src/server/trainer_worker.py` | Done | True on-policy SDFT with PEFT LoRA: 4-bit NF4 quantized loading via bitsandbytes, on-policy rollout (gradient checkpointing toggled off for generate), reverse KL (no SFT term), EMA teacher via weight swap, NIM enrichment, step-0 KL diagnostics |
 | **Shared schemas** | `src/shared/schemas.py` | Done | Pydantic models for client-server communication |
 | **Adapter layer** | `src/policy/adapter_layer.py` | Present | Not yet wired as learnable head in run path |
 | **SDFT module** | `src/sdft/sdft_module.py` | Done | EMA teacher, KL loss, confidence/success gating; no actual gradient step yet |
@@ -147,10 +147,10 @@ All inference runs locally on the Mac (MLX, Transformers, TensorRT, or NIM). The
 ### Remote training flow (GPU server, on-policy SDFT with PEFT LoRA)
 1. Client uploads trajectory via `TrajectoryUploader` → `/upload_trajectory` (tar.gz of JSON + PNGs).
 2. Client POSTs `/train` with trajectory IDs and hyperparameters (`ema_alpha`, `enrich`, etc.).
-3. `trainer_worker.run_training()` loads the base model + PEFT LoRA, runs true on-policy SDFT:
-   - On-policy rollout from student (`model.generate(do_sample=True, temperature=1.0)`)
+3. `trainer_worker.run_training()` loads the base model in **4-bit NF4** (bitsandbytes) + PEFT LoRA, runs true on-policy SDFT:
+   - On-policy rollout from student (`model.generate(do_sample=True, temperature=1.0)`) — gradient checkpointing temporarily disabled for generation so KV cache works with Gemma 3's vision masking
    - Optional Nemotron Ultra 253B enrichment of expert demonstrations (via `src/sdft/enrichment.py`, text-only, with caching)
-   - Swap to EMA teacher weights, forward with ICL-enriched prompt on rollout tokens
+   - Swap to EMA teacher weights, forward with ICL-enriched prompt on rollout tokens (extends `token_type_ids` for Gemma 3)
    - Reverse KL: `D_KL(student || teacher)` — no SFT term
    - EMA teacher update with configurable `ema_alpha`
 4. Teacher state is a `dict` of cloned LoRA tensors (~10-50MB), not a full model copy.
@@ -203,6 +203,8 @@ The previous fallback regex matched action keywords (TYPE, CLICK) anywhere in te
 - **Backends:** Transformers for flexibility; TensorRT for throughput on NVIDIA; MLX for Apple Silicon; NIM for NVIDIA cloud.
 - **Local inference, remote training:** All inference runs locally (Mac or workstation). The remote GPU server is used only for LoRA adapter training, keeping the architecture simple and the same repo runs on both sides.
 - **Frozen backbone + PEFT LoRA adapter:** Keeps behavior stable and limits memory. Only LoRA parameters (~10-50MB) are trained and swapped.
+- **4-bit quantized training:** Base model loaded in NF4 via bitsandbytes, with `prepare_model_for_kbit_training()` for proper gradient handling. Fits 12B models on 24-48GB GPUs.
+- **Cross-platform adapter compatibility:** Adapters trained on GPU (PEFT/PyTorch) auto-remap to MLX format for Mac inference — key name transformation + weight transposing.
 - **EMA teacher + gating:** Enables deployment-time self-distillation. Teacher state is cloned LoRA weights only (not full model), enabling SDFT on single-GPU setups.
 
 ---

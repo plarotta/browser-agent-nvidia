@@ -29,6 +29,11 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 - **Step-0 KL diagnostics:** Both MLX and server trainers log a prominent diagnostic at step 0 — warns if KL < 0.01 (enrichment too weak or ema_alpha too low).
 - **Adapter config saved during training:** Both trainers save `adapter_config.json` alongside adapter weights for reliable loading at inference.
 - **TrainRequest schema extended:** Added `ema_alpha` and `enrich` fields, passed through from API to trainer.
+- **4-bit quantized training:** Server trainer loads the base model in 4-bit NF4 via bitsandbytes + `prepare_model_for_kbit_training()`. Fits 12B models on 24-48GB GPUs with room for forward/backward pass.
+- **Gemma 3 gradient checkpointing fix:** `model.generate()` requires KV cache, which conflicts with gradient checkpointing. Trainer toggles checkpointing off during rollout generation and re-enables it (with `use_reentrant=False`) for training forward passes.
+- **Gemma 3 token_type_ids handling:** Teacher and student forward passes extend `token_type_ids` (zeros for text) when concatenating rollout tokens, so Gemma 3's vision masking stays aligned.
+- **PEFT→MLX adapter remapping:** `mlx_policy.py` auto-detects PyTorch PEFT adapter format and remaps keys (`base_model.model.` prefix strip, `lora_A.weight`→`lora_a`) + transposes weights. Adapters trained on GPU server load directly on Mac via MLX.
+- **E2E training verified:** First successful remote training run completed — 4-bit model, 9 positive samples, 2 epochs, healthy KL (step-0 = 0.33, avg ~0.81).
 
 ---
 
