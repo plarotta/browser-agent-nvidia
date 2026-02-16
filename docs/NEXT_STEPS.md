@@ -37,6 +37,20 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 
 ---
 
+## Phase 0: Critical
+
+### 0.1 Credential store and LOGIN action
+**Goal:** The agent needs a secure, sandboxed way to log into websites without exposing credentials in prompts, trajectories, or logs.
+**Current:** No credential management. The agent cannot log into anything autonomously.
+**Action:**
+- Build a credential store (encrypted at rest, scoped per-site) that the agent reads from but never surfaces in prompts or logged trajectories.
+- Add a new `LOGIN` action type with programmatic behavior: the agent emits `LOGIN` with a site identifier, and the executor looks up credentials from the store, fills the username/password fields, and submits — all without the model ever seeing the actual values.
+- The executor should handle common login form variants (single-page, two-step, OAuth redirect to username/password).
+- Credentials should never appear in screenshots, DOM snapshots, trajectory logs, or model context.
+**Effort:** Medium-large.
+
+---
+
 ## Phase 1: Model Quality & Robustness
 
 ### 1.1 Improve answer extraction accuracy
@@ -139,14 +153,15 @@ A concise, prioritized plan for advancing the Self-Learning Browser Agent. Items
 
 ## Suggested order
 
-1. **1.1** -- Answer extraction accuracy (core quality).
-2. **1.4** -- More guards (robustness for small models).
-3. **1.2** -- Confidence into SDFT gating (correct learning).
-4. **1.3** -- Update budget (safety).
-5. **2.1** -- Checkpoint integration (safety story).
-6. **3.2** -- Config from file (quality of life).
-7. ~~**2.2** -- Learnable adapter + real SDFT~~ (Done — E2E pipeline working: deploy command, adapter download, MLX adapter loading).
-8. Then **3.1**, **3.3**, **4.x** as needed for demo and scale.
+1. **0.1** -- Credential store + LOGIN action (unblocks real-world tasks).
+2. **1.1** -- Answer extraction accuracy (core quality).
+3. **1.4** -- More guards (robustness for small models).
+4. **1.2** -- Confidence into SDFT gating (correct learning).
+5. **1.3** -- Update budget (safety).
+6. **2.1** -- Checkpoint integration (safety story).
+7. **3.2** -- Config from file (quality of life).
+8. ~~**2.2** -- Learnable adapter + real SDFT~~ (Done — E2E pipeline working: deploy command, adapter download, MLX adapter loading).
+9. Then **3.1**, **3.3**, **4.x** as needed for demo and scale.
 
 ---
 
